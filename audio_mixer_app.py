@@ -25,6 +25,7 @@ try:
     from win32com.client import Dispatch
 except ImportError:
     winshell = None
+    Dispatch = None
 
 try:
     import win32gui
@@ -197,8 +198,19 @@ class AudioMixerApp(ctk.CTk):
     # Sliders superiores
     SLIDER_TRACK_WIDTH = 15
     SLIDER_HANDLE_WIDTH = 120
+    SLIDER_LENGTH = 400
     SLIDER_BUTTON_LEN = 18
     SLIDER_BUTTON_RADIUS = 3
+    SLIDER_HANDLE_CHAMFER = 150
+    SLIDER_TOP_OFFSET = 0
+    SLIDER_BOTTOM_OFFSET = 10
+
+    ANALOG_MIN_RAW = 0      # Usar todo el rango del ADC evita zonas muertas en los extremos
+    ANALOG_MAX_RAW = 1023
+    ANALOG_CURVE_EXP = 0.8
+    ANALOG_CALIBRATION_MIN_RANGE = 60
+    ANALOG_INITIAL_MARGIN = 120  # margen para pre-calibrar el primer valor y evitar saltos iniciales
+    ANALOG_BOOT_CENTER = 512     # valor central que asumimos hasta leer datos reales
 
     ZERO_EPS = 0.01
     ENDPOINT_CACHE_TTL_S = 10
@@ -294,26 +306,36 @@ class AudioMixerApp(ctk.CTk):
         self.settings_window = None
         self._settings_icon_photo = {}
         self.active_channel_frame = None
+        self._raw_min = [float('inf')]*5
+        self._raw_max = [float('-inf')]*5
+        self._slider_handle_image_path = resource_path("assets/slider_handle.png")
+        if not os.path.exists(self._slider_handle_image_path):
+            self._slider_handle_image_path = None
 
         # Bandeja
         self.minimize_to_tray_var = ctk.BooleanVar(value=True)
+        self.startup_with_windows_var = ctk.BooleanVar(value=self.check_startup_status())
         self.tray_icon = None
         self._tray_running = False
         self._restoring = False
 
         # Valores animados / envío
-        self.current_values = [0.0]*5
-        self.target_values = [0.0]*5
-        self.last_sent_values = [-1.0]*5
+        boot_percent = self._boot_percent()
+        self.current_values = [boot_percent]*5
+        self.target_values = [boot_percent]*5
+        self.last_sent_values = [boot_percent]*5
         self.last_sent_times = [0.0]*5
+        self._first_value_applied = [False]*5  # evita animaciones bruscas al inicio
 
         self._last_serial_data_ts = time.time()
         self._endpoint_cache = None
         self._endpoint_cache_ts = 0.0
+        self._mic_endpoint_cache = None
+        self._mic_endpoint_cache_ts = 0.0
 
         # ---- UI ----
         self.status_label = ctk.CTkLabel(self, text="Iniciando...", font=ctk.CTkFont(size=14, family=self.FONT_UI))
-        self.status_label.pack(pady=(10, 5))
+        self.status_label.pack(pady=(0, 5))
 
         self.device_frame = ctk.CTkFrame(self, corner_radius=10, border_width=2)
         self.device_frame.pack(pady=10, padx=20, fill="both", expand=True)
@@ -455,6 +477,8 @@ class AudioMixerApp(ctk.CTk):
 
         fader_container = ctk.CTkFrame(col, fg_color="transparent")
         fader_container.pack(pady=10, fill="both", expand=True)
+        fader_container.pack_propagate(False)
+        fader_container.bind("<Configure>", lambda e, slider_index=channel_index: self._position_slider(slider_index))
 
         fader = WideHandleSlider(
             fader_container,
@@ -463,13 +487,18 @@ class AudioMixerApp(ctk.CTk):
             orientation="vertical",
             state="disabled",
             width=self.SLIDER_HANDLE_WIDTH,
+            height=self.SLIDER_LENGTH + self.SLIDER_BUTTON_LEN,
+            corner_radius=0,
             button_length=self.SLIDER_BUTTON_LEN,
             button_corner_radius=self.SLIDER_BUTTON_RADIUS,
             track_width=self.SLIDER_TRACK_WIDTH,
+            track_end_margin=0,
+            handle_chamfer=self.SLIDER_HANDLE_CHAMFER,
+            handle_image_path=self._slider_handle_image_path,
         )
         fader.set(0)
-        fader.pack(pady=15, padx=10, fill="y", expand=True)
         self.sliders.append(fader)
+        self._position_slider(channel_index)
 
     def create_knob_channel(self, parent, knob_index):
         idx = knob_index + 3
@@ -504,6 +533,35 @@ class AudioMixerApp(ctk.CTk):
 
         self.knobs.append({'canvas': knob_canvas, 'marker_id': marker_id, 'oval_id': oval_id,
                            'size': size, 'margin': margin, 'stroke': stroke})
+
+    def _position_slider(self, slider_index):
+        try:
+            slider = self.sliders[slider_index]
+        except IndexError:
+            return
+
+        container = slider.master
+        if container is None:
+            return
+
+        container.update_idletasks()
+        container_height = container.winfo_height()
+        if container_height <= 0:
+            self.after(10, lambda idx=slider_index: self._position_slider(idx))
+            return
+
+        available = max(0, container_height - (self.SLIDER_TOP_OFFSET + self.SLIDER_BOTTOM_OFFSET))
+        if available <= 0:
+            target_height = 1
+        else:
+            gap = int(self.SLIDER_BUTTON_LEN * 0.25)
+            target_height = max(1, available - gap)  # recorta un poco para evitar que se pase abajo
+        y_offset = self.SLIDER_TOP_OFFSET
+
+        if not slider.place_info():
+            slider.place(relx=0.5, rely=0.0, anchor="n")
+
+        slider.place_configure(y=y_offset, height=target_height)
 
     # ======= Hover =======
     def on_name_frame_enter(self, frame):
@@ -581,15 +639,18 @@ class AudioMixerApp(ctk.CTk):
         settings_frame = ctk.CTkFrame(self.settings_window)
         settings_frame.pack(expand=True, fill="both", padx=10, pady=10)
 
+        self.startup_with_windows_var.set(self.check_startup_status())
+
         startup_checkbox = ctk.CTkCheckBox(settings_frame, text="Iniciar con Windows",
                                            font=ctk.CTkFont(family=self.FONT_UI, size=12),
+                                           variable=self.startup_with_windows_var,
+                                           onvalue=True, offvalue=False,
                                            command=self.toggle_startup)
         startup_checkbox.pack(pady=10, padx=10, anchor="w")
-        if self.check_startup_status():
-            startup_checkbox.select()
-        if winshell is None:
+        if winshell is None or Dispatch is None:
+            self.startup_with_windows_var.set(False)
             startup_checkbox.configure(state="disabled")
-            ctk.CTkLabel(settings_frame, text="Instala 'winshell' para esta opcion", text_color="orange").pack(
+            ctk.CTkLabel(settings_frame, text="Instala 'winshell' y 'pywin32' para esta opcion", text_color="orange").pack(
                 pady=5, padx=10, anchor="w")
 
         minimize_checkbox = ctk.CTkCheckBox(settings_frame, text="Minimizar a la bandeja al cerrar",
@@ -614,27 +675,50 @@ class AudioMixerApp(ctk.CTk):
                           command=lambda n=name: self.apply_theme(n)).grid(row=0, column=i, padx=5)
 
     def toggle_startup(self):
-        if winshell is None:
+        desired_state = bool(self.startup_with_windows_var.get())
+
+        if winshell is None or Dispatch is None:
+            self.startup_with_windows_var.set(False)
+            messagebox.showerror("Iniciar con Windows", "Instala los paquetes 'winshell' y 'pywin32' para usar esta opcion.")
             return
+
         shortcut_path = self.get_shortcut_path()
-        if os.path.exists(shortcut_path):
-            os.remove(shortcut_path)
-        else:
-            target_path = sys.executable
-            script_path = os.path.abspath(__file__)
-            working_dir = os.path.dirname(script_path)
+        shortcut_dir = os.path.dirname(shortcut_path)
+        error_message = None
 
-            shell = Dispatch('WScript.Shell')
-            shortcut = shell.CreateShortCut(shortcut_path)
-            shortcut.Targetpath = target_path
-            if not getattr(sys, 'frozen', False):
-                shortcut.Arguments = f'"{script_path}"'
-            shortcut.WorkingDirectory = working_dir
+        try:
+            if desired_state:
+                if shortcut_dir and not os.path.exists(shortcut_dir):
+                    os.makedirs(shortcut_dir, exist_ok=True)
 
-            ico = resource_path("assets/knob.ico")
-            if os.path.exists(ico):
-                shortcut.IconLocation = ico
-            shortcut.save()
+                target_path = sys.executable
+                script_path = os.path.abspath(__file__)
+                working_dir = os.path.dirname(script_path)
+
+                shell = Dispatch('WScript.Shell')
+                shortcut = shell.CreateShortCut(shortcut_path)
+                shortcut.Targetpath = target_path
+                if not getattr(sys, 'frozen', False):
+                    shortcut.Arguments = f'"{script_path}"'
+                else:
+                    shortcut.Arguments = ""
+                shortcut.WorkingDirectory = working_dir
+
+                ico = resource_path("assets/knob.ico")
+                if os.path.exists(ico):
+                    shortcut.IconLocation = ico
+                shortcut.save()
+            else:
+                if os.path.exists(shortcut_path):
+                    os.remove(shortcut_path)
+        except Exception as e:
+            error_message = str(e)
+            self._log_error(f"toggle_startup: {e}")
+
+        if error_message:
+            self.startup_with_windows_var.set(not desired_state)
+            messagebox.showerror("Iniciar con Windows",
+                                 "No se pudo actualizar el inicio automatico. Revisa los permisos e intenta de nuevo.")
 
     def check_startup_status(self):
         if winshell is None:
@@ -694,7 +778,7 @@ class AudioMixerApp(ctk.CTk):
                                             label_font=ctk.CTkFont(family=self.FONT_UI, size=14))
         scrollable.pack(expand=True, fill="both", padx=10, pady=10)
 
-        special_options = ["Volumen General", "Aplicacion en Foco", "Quitar Asignacion"]
+        special_options = ["Volumen General", "Aplicacion en Foco", "Microfono", "Quitar Asignacion"]
         for option in special_options:
             ctk.CTkButton(scrollable, text=option,
                           font=ctk.CTkFont(family=self.FONT_UI, size=12, weight="bold"),
@@ -926,10 +1010,24 @@ class AudioMixerApp(ctk.CTk):
                 for i, val_str in enumerate(values):
                     try:
                         # --- Mapeo más preciso ---
-                        percent = self._analog_to_percent(int(val_str))
+                        percent = self._analog_to_percent(i, int(val_str))
+                        percent = max(0.0, min(100.0, percent))
+
+                        if not self._first_value_applied[i]:
+                            self._first_value_applied[i] = True
+                            self.last_processed_volumes[i] = percent
+                            self.current_values[i] = percent
+                            self.target_values[i] = percent
+                            if i < 3:
+                                if i < len(self.sliders):
+                                    self.sliders[i].set(percent)
+                            else:
+                                self.update_knob_visual(i - 3, percent)
+                            continue
+
                         if abs(percent - self.last_processed_volumes[i]) > 0.5:
                             self.last_processed_volumes[i] = percent
-                            self.target_values[i] = max(0.0, min(100.0, percent))
+                            self.target_values[i] = percent
                             changed = True
                     except (ValueError, IndexError):
                         continue
@@ -937,15 +1035,37 @@ class AudioMixerApp(ctk.CTk):
             self.ensure_animating()
 
     # ======= Curva de calibración =======
-    def _analog_to_percent(self, raw_value):
-        """
-        Convierte la lectura cruda (0–1023) del Arduino a porcentaje corregido.
-        Esta curva ajusta la respuesta para que el 50% físico ≈ 50% de volumen real.
-        """
-        x = max(0.0, min(1023.0, float(raw_value))) / 1023.0
-        exponent = 0.8  # ajusta si lo ves necesario
-        corrected = math.pow(x, exponent)
+    def _analog_to_percent(self, channel_index, raw_value):
+        """Convierte la lectura cruda al rango completo 0–100 % con auto-calibración."""
+        raw = max(self.ANALOG_MIN_RAW, min(self.ANALOG_MAX_RAW, float(raw_value)))
+
+        normalized = None
+        if 0 <= channel_index < len(self._raw_min):
+            if math.isinf(self._raw_min[channel_index]):
+                base_min = self.ANALOG_MIN_RAW
+                base_max = self.ANALOG_MAX_RAW
+                self._raw_min[channel_index] = base_min
+                self._raw_max[channel_index] = base_max
+
+            self._raw_min[channel_index] = min(self._raw_min[channel_index], raw)
+            self._raw_max[channel_index] = max(self._raw_max[channel_index], raw)
+            span = self._raw_max[channel_index] - self._raw_min[channel_index]
+            if span >= self.ANALOG_CALIBRATION_MIN_RANGE:
+                normalized = (raw - self._raw_min[channel_index]) / max(1.0, span)
+
+        if normalized is None:
+            span = max(1.0, float(self.ANALOG_MAX_RAW - self.ANALOG_MIN_RAW))
+            normalized = (raw - self.ANALOG_MIN_RAW) / span
+
+        normalized = max(0.0, min(1.0, normalized))
+        corrected = math.pow(normalized, self.ANALOG_CURVE_EXP)
         return corrected * 100.0
+
+    def _boot_percent(self):
+        span = max(1.0, float(self.ANALOG_MAX_RAW - self.ANALOG_MIN_RAW))
+        normalized = (self.ANALOG_BOOT_CENTER - self.ANALOG_MIN_RAW) / span
+        normalized = max(0.0, min(1.0, normalized))
+        return math.pow(normalized, self.ANALOG_CURVE_EXP) * 100.0
 
     # ======= Animación =======
     def ensure_animating(self):
@@ -1035,6 +1155,23 @@ class AudioMixerApp(ctk.CTk):
             self._log_error(f"_get_master_endpoint error: {e}")
             return None
 
+    def _get_microphone_endpoint(self):
+        now = time.time()
+        if self._mic_endpoint_cache and (now - self._mic_endpoint_cache_ts) < self.ENDPOINT_CACHE_TTL_S:
+            return self._mic_endpoint_cache
+        try:
+            devices = AudioUtilities.GetMicrophone()
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            endpoint = cast(interface, POINTER(IAudioEndpointVolume))
+            self._mic_endpoint_cache = endpoint
+            self._mic_endpoint_cache_ts = now
+            return endpoint
+        except Exception as e:
+            self._mic_endpoint_cache = None
+            self._mic_endpoint_cache_ts = 0.0
+            self._log_error(f"_get_microphone_endpoint error: {e}")
+            return None
+
     def volume_tick(self):
         now = time.time()
         sessions_cache = None
@@ -1069,6 +1206,16 @@ class AudioMixerApp(ctk.CTk):
             # === 1) Volumen general ===
             if process_name == "Volumen General":
                 endpoint = self._get_master_endpoint()
+                if endpoint:
+                    try:
+                        endpoint.SetMute(should_mute, None)
+                    except Exception:
+                        pass
+                    endpoint.SetMasterVolumeLevelScalar(0.0 if should_mute else scalar, None)
+                return
+
+            if process_name == "Microfono":
+                endpoint = self._get_microphone_endpoint()
                 if endpoint:
                     try:
                         endpoint.SetMute(should_mute, None)
@@ -1131,7 +1278,10 @@ class AudioMixerApp(ctk.CTk):
 
     # ======= Bandeja =======
     def on_closing_to_tray(self):
-        self.hide_to_tray()
+        if self.minimize_to_tray_var.get():
+            self.hide_to_tray()
+        else:
+            self.shutdown_app()
 
     def _build_tray_icon(self):
         tray_image = None
