@@ -1,0 +1,69 @@
+{
+  "theme": "Nebula",
+  "minimize_to_tray": true,
+  "channel_assignments": {
+    "0": "opera",
+    "1": "Discord",
+    "2": "Spotify",
+    "3": "master",
+    "4": "focus"
+  },
+  "encoder_assignments": [
+    {
+      "click": "mute",
+      "dblclick": "play_pause",
+      "click_turn": "mic"
+    },
+    {
+      "click": "mute",
+      "dblclick": "play_pause",
+      "click_turn": "mic"
+    }
+  ],
+  "last_port": "COM13",
+  "profiles": {
+    "Default": {
+      "channel_assignments": {
+        "0": "opera",
+        "1": "Discord",
+        "2": "Spotify",
+        "3": "master",
+        "4": "focus"
+      },
+      "encoder_assignments": [
+        {
+          "click": "mute",
+          "dblclick": "play_pause",
+          "click_turn": "mic"
+        },
+        {
+          "click": "mute",
+          "dblclick": "play_pause",
+          "click_turn": "mic"
+        }
+      ]
+    },
+    "Gaming": {
+      "channel_assignments": {
+        "0": "Opera",
+        "1": "Discord",
+        "2": "Spotify",
+        "3": "master",
+        "4": "focus"
+      },
+      "encoder_assignments": [
+        {
+          "click": "mute",
+          "dblclick": "play_pause",
+          "click_turn": "mic"
+        },
+        {
+          "click": "mute",
+          "dblclick": "play_pause",
+          "click_turn": "mic"
+        }
+      ]
+    }
+  },
+  "active_profile": "Gaming"
+}
