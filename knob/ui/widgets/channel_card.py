@@ -82,7 +82,10 @@ class ChannelCard(GlassCard):
         fm = QFontMetrics(self.name_label.font())
         self.name_label.setText(fm.elidedText(title, Qt.TextElideMode.ElideRight, NAME_MAX_PX))
         self.name_label.setToolTip(title)
-        if kind != "focus":
+        if kind == "focus":
+            self.sub_label.setText("→ ninguna")
+            self.sub_label.show()
+        else:
             self.sub_label.hide()
         self._pct = None
         self._render_value()

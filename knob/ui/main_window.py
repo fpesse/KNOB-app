@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Ventana única de KNOB: barra superior, 3 canales, 2 encoders y salida de audio."""
 from PySide6.QtCore import QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMenu, QPushButton, QToolButton, QVBoxLayout
 
 from knob.core import system
@@ -121,7 +121,7 @@ class MainWindow(QMainWindow):
         self.profile_btn.setText(f"Perfil: {active}  ▾")
         self._profile_menu.clear()
         for name in names:
-            act = self._profile_menu.addAction(("✓  " if name == active else "     ") + name)
+            act = self._profile_menu.addAction(("✓  " if name == active else "     ") + name.replace("&", "&&"))
             act.triggered.connect(lambda _=False, n=name: self.profile_selected.emit(n))
 
     def set_update_badge(self, on: bool) -> None:
@@ -150,5 +150,9 @@ class MainWindow(QMainWindow):
         self._style_title_bar()
 
     def closeEvent(self, e):
+        app = QGuiApplication.instance()
+        if app is not None and app.isSavingSession():
+            e.accept()                 # cierre de sesión de Windows: no bloquearlo
+            return
         e.ignore()                     # el controlador decide: bandeja o salir
         self.close_requested.emit()

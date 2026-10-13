@@ -68,3 +68,72 @@ def test_canal_muestra_porcentaje_y_mute(qapp):
     card.set_muted(False)
     card.set_value(512)
     assert card.value_label.text() == "50%"
+
+
+def test_perfil_con_ampersand_se_escapa(qapp):
+    from knob.ui.main_window import MainWindow
+    from knob.ui.theme import get_theme
+    w = MainWindow(get_theme("Nebula"))
+    w.set_profiles(["Default", "R&B"], "Default")
+    assert w._profile_menu.actions()[1].text().strip().replace("✓", "").strip() == "R&&B"
+
+
+@pytest.mark.parametrize("cls_name", ["channel_card.ChannelCard", "encoder_card.EncoderCard"])
+def test_subtitulo_de_foco(qapp, cls_name):
+    import importlib
+    from knob.ui.theme import get_theme
+    mod, cls = cls_name.split(".")
+    card = getattr(importlib.import_module(f"knob.ui.widgets.{mod}"), cls)(0, get_theme("Nebula"))
+    card.show()
+    card.set_assignment("App en foco", None, "focus")
+    assert card.sub_label.text() == "→ ninguna"
+    card.set_focus_target("Chrome")
+    assert card.sub_label.text() == "→ Chrome"
+    card.set_assignment("Discord", None, None)
+    assert not card.sub_label.isVisibleTo(card)
+
+
+def test_app_icons_cache_y_reintento(qapp, monkeypatch):
+    import sys
+    from knob.ui import icons
+    calls = []
+
+    def lookup(name):
+        calls.append(name)
+        return sys.executable if name.lower() == "python" else None
+
+    ai = icons.AppIcons(lookup)
+    p1 = ai.icon_for("Python")
+    assert p1 is not None and not p1.isNull()
+    assert ai.icon_for("python") is p1
+    assert calls == ["Python"]
+    clock = {"t": 100.0}
+    monkeypatch.setattr(icons.time, "monotonic", lambda: clock["t"])
+    assert ai.icon_for("nada") is None
+    assert ai.icon_for("nada") is None
+    assert calls.count("nada") == 1
+    clock["t"] += icons.RETRY_S + 1
+    assert ai.icon_for("nada") is None
+    assert calls.count("nada") == 2
+
+
+def test_app_icons_ruta_inexistente(qapp):
+    from knob.ui.icons import AppIcons
+    assert AppIcons(lambda n: r"C:\no\existe.exe").icon_for("x") is None
+
+
+def test_output_bar_nombre_y_flechas(qapp):
+    from PySide6.QtWidgets import QToolButton
+    from knob.ui.theme import get_theme
+    from knob.ui.widgets.output_bar import OutputBar
+    bar = OutputBar(get_theme("Nebula"))
+    bar.set_name(None)
+    assert bar.name_label.text() == "Sin dispositivo de salida"
+    got = []
+    bar.prev_clicked.connect(lambda: got.append("prev"))
+    bar.next_clicked.connect(lambda: got.append("next"))
+    btns = bar.findChildren(QToolButton)
+    assert len(btns) == 2
+    btns[0].click()
+    btns[1].click()
+    assert got == ["prev", "next"]

@@ -81,7 +81,10 @@ class EncoderCard(GlassCard):
         fm = QFontMetrics(self.title_label.font())
         self.title_label.setText(fm.elidedText(title, Qt.TextElideMode.ElideRight, TITLE_MAX_PX))
         self.title_label.setToolTip(title)
-        if kind != "focus":
+        if kind == "focus":
+            self.sub_label.setText("→ ninguna")
+            self.sub_label.show()
+        else:
             self.sub_label.hide()
 
     def set_focus_target(self, name) -> None:
