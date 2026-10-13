@@ -5,6 +5,10 @@
 class FakeEffects:
     def __init__(self):
         self.calls = []
+        self.levels = {}
+
+    def get_level(self, target):
+        return self.levels.get(target)
 
     def set_volume(self, target, level):
         self.calls.append(("set_volume", target, round(level, 4)))

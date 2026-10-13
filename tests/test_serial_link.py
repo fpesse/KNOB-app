@@ -108,3 +108,32 @@ def test_search_contiene_excepcion_de_handshake_y_sigue_con_el_siguiente(monkeyp
     assert result is created["COM7"]
     assert created["COM5"].closed is True
     assert ("connected", "COM7") in statuses
+
+
+def test_modos_de_mantener_se_envian_al_conectar_y_al_cambiar():
+    from knob.core.serial_link import SerialLink
+
+    class WriteSerial:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, data):
+            self.writes.append(data)
+
+    link = SerialLink(lambda: None)
+    link.set_hold_modes([True, False])            # sin conexión: solo se guarda
+    ser = WriteSerial()
+    link._send_hold_modes(ser)                    # lo que hace _run al conectar
+    link._ser = ser
+    link.set_hold_modes([False, True])            # con conexión: se envía en el momento
+    assert ser.writes == [b"{KNOB_CMD_HOLD:10}\n", b"{KNOB_CMD_HOLD:01}\n"]
+
+
+def test_take_latest_frame_trae_el_giro():
+    from knob.core import protocol
+    from knob.core.serial_link import SerialLink
+    link = SerialLink(lambda: None)
+    link._latest = protocol.parse_frame("1|2|3|4|5|3|0|50|0")
+    frame = link.take_latest_frame()
+    assert frame.hold_turns == [50, 0]
+    assert link.take_latest() is None

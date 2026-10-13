@@ -47,6 +47,11 @@ def next_peak(level: float, peak: float) -> float:
     return level if level > peak else max(0.0, peak - VU_PEAK_DECAY)
 
 
+def level_to_raw(level: float) -> float:
+    """Inversa de raw_to_level: nivel 0-1 -> posición equivalente 0-1023."""
+    return math.sqrt(max(0.0, min(1.0, level))) * 1023.0
+
+
 def default_encoder_entry() -> dict:
     return {"click": "none", "dblclick": "none", "click_turn": "none",
             "hotkey_keys_click": "", "hotkey_keys_dblclick": ""}
@@ -58,6 +63,7 @@ class Effects(Protocol):
     def send_hotkey(self, combo: str) -> None: ...
     def step_master(self, delta: float) -> None: ...
     def cycle_output(self, direction: int) -> None: ...
+    def get_level(self, target: str): ...                           # nivel actual 0-1, o None
 
 
 class Engine:
@@ -75,6 +81,13 @@ class Engine:
         self.encoder_held = [False, False]
         self.hold_saved = [None, None]
         self.enc_prev_raw = [None, None]
+        # Firmware nuevo: el giro mientras se mantiene llega aparte (hold_turns) y la perilla
+        # no se mueve. hold_capable queda en True al recibir el primer frame que lo trae.
+        self.hold_capable = False
+        self.hold_turns = [0, 0]
+        self._hold_target = [None, None]     # destino resuelto al empezar a mantener
+        self._hold_base = [0.0, 0.0]         # posición equivalente (0-1023) del destino
+        self._hold_last_turn = [None, None]
         self._last_vol_ms = float("-inf")
         self._dev_switch_ms = float("-inf")
         self._volume_dirty = False
@@ -102,7 +115,13 @@ class Engine:
         return bool(self.channel_assignments.get(ch)) and self.smooth_vals[ch] <= MUTE_THRESHOLD
 
     # --- hardware -------------------------------------------------------
-    def on_frame(self, values: list) -> None:
+    def on_frame(self, values: list, hold_turns=None) -> None:
+        if hold_turns is not None:
+            self.hold_capable = True
+            if list(hold_turns[:2]) != self.hold_turns:
+                self.hold_turns = list(hold_turns[:2])
+                if any(self.encoder_held):
+                    self._volume_dirty = True
         for i in range(NUM_CHANNELS):
             if i in DIAL_CHANNELS and self.dial_muted[i - 3]:
                 self.target_vals[i] = 0.0      # dial muteado con el botón: ignora el hardware
@@ -122,7 +141,7 @@ class Engine:
                         self.smooth_vals[i] = 0.0
                         needs_update = True
                     continue
-                if self.encoder_held[e] and self.turn_key(e) != "none":
+                if self.encoder_held[e] and self.turn_key(e) != "none" and not self.hold_capable:
                     if self.hold_saved[e] is not None:
                         self.smooth_vals[i] = self.hold_saved[e]   # congela UI/audio, no el target
                     needs_update = True
@@ -153,6 +172,9 @@ class Engine:
         for i in range(NUM_CHANNELS):
             if i in DIAL_CHANNELS:
                 e = i - 3
+                if self.encoder_held[e] and self.hold_capable and self.turn_key(e) != "none":
+                    self._apply_hold_turn(e)
+                    continue                        # la perilla propia no cambia mientras se mantiene
                 if self.encoder_held[e]:
                     turn = self.turn_key(e)
                     if turn == "output_device":
@@ -167,6 +189,47 @@ class Engine:
                         self.apply_key(turn, self.smooth_vals[i])
                         continue
             self.apply_channel(i, self.smooth_vals[i])
+
+    def _apply_hold_turn(self, e: int) -> None:
+        """Firmware nuevo: el giro acumulado mueve el destino desde su volumen inicial."""
+        turn_key = self.turn_key(e)
+        turn = self.hold_turns[e]
+        if turn_key == "output_device":
+            prev = self.enc_prev_raw[e]
+            if prev is not None and abs(turn - prev) > OUTPUT_TURN_THRESHOLD:
+                self._cycle_output(1 if turn > prev else -1)
+                self.enc_prev_raw[e] = turn
+            elif prev is None:
+                self.enc_prev_raw[e] = turn
+            return
+        target = self._hold_target[e]
+        if target is None or turn == self._hold_last_turn[e]:
+            return
+        raw = self._hold_base[e] + turn
+        if raw > 1023.0:                      # al pasarse del tope, el tope pasa a ser la base
+            self._hold_base[e] = 1023.0 - turn
+            raw = 1023.0
+        elif raw < 0.0:
+            self._hold_base[e] = -float(turn)
+            raw = 0.0
+        self._hold_last_turn[e] = turn
+        self.effects.set_volume(target, raw_to_level(raw))
+
+    def _start_hold_turn(self, e: int) -> None:
+        turn_key = self.turn_key(e)
+        self._hold_last_turn[e] = self.hold_turns[e]
+        if turn_key == "output_device":
+            self.enc_prev_raw[e] = self.hold_turns[e]
+            return
+        target = self._focus() if turn_key == "focus" else turn_key
+        self._hold_target[e] = target or None
+        level = None
+        if target:
+            try:
+                level = self.effects.get_level(target)
+            except Exception:
+                level = None
+        self._hold_base[e] = level_to_raw(level) if level is not None else self.smooth_vals[3 + e]
 
     # --- volumen --------------------------------------------------------
     def apply_key(self, key: str, raw_val: float) -> None:
@@ -232,7 +295,10 @@ class Engine:
         elif code == protocol.BTN_HELD_START:
             self.encoder_held[enc_idx] = True
             if self.turn_key(enc_idx) != "none":
-                self.hold_saved[enc_idx] = self.smooth_vals[ch]
+                if self.hold_capable:
+                    self._start_hold_turn(enc_idx)
+                else:
+                    self.hold_saved[enc_idx] = self.smooth_vals[ch]
         elif code == protocol.BTN_HELD_END:
             self.encoder_held[enc_idx] = False
             if self.turn_key(enc_idx) != "none" and self.hold_saved[enc_idx] is not None:
@@ -240,6 +306,8 @@ class Engine:
                 self.target_vals[ch] = self.hold_saved[enc_idx]
             self.hold_saved[enc_idx] = None
             self.enc_prev_raw[enc_idx] = None
+            self._hold_target[enc_idx] = None
+            self._hold_last_turn[enc_idx] = None
 
     def _execute(self, enc_idx: int, action_type: str) -> None:
         entry = self.encoder_assignments[enc_idx]

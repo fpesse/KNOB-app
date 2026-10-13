@@ -19,10 +19,11 @@ BTN_HELD_END = 4
 class Frame:
     values: list    # 5 valores analógicos 0-1023
     buttons: list   # [btnL, btnR]; None si el frame no los trae o no son numéricos
+    hold_turns: list = None   # [giroL, giroR] mientras se mantiene el botón; None = firmware viejo
 
 
 def parse_frame(line: str):
-    """Parsea 'v0|v1|v2|v3|v4|btnL|btnR'. Acepta >= 5 valores (frames legados)."""
+    """Parsea 'v0|v1|v2|v3|v4|btnL|btnR|giroL|giroR'. Acepta >= 5 valores (frames legados)."""
     partes = line.strip().split("|")
     if len(partes) < NUM_CHANNELS:
         return None
@@ -39,7 +40,19 @@ def parse_frame(line: str):
                 buttons.append(None)
         else:
             buttons.append(None)
-    return Frame(values, buttons)
+    hold_turns = None
+    if len(partes) >= 9:
+        try:
+            hold_turns = [int(partes[7]), int(partes[8])]
+        except ValueError:
+            hold_turns = None
+    return Frame(values, buttons, hold_turns)
+
+
+def hold_command(modes) -> bytes:
+    """Le dice al firmware qué encoders tienen "mantener y girar" activo: {KNOB_CMD_HOLD:XY}."""
+    flags = "".join("1" if on else "0" for on in modes[:2])
+    return f"{{KNOB_CMD_HOLD:{flags}}}\n".encode()
 
 
 def is_stream_line(line: str) -> bool:

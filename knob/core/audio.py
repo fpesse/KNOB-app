@@ -151,6 +151,23 @@ class AudioBackend:
             interface = mic.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
             interface.QueryInterface(IAudioEndpointVolume).SetMasterVolumeLevelScalar(level, None)
 
+    def get_level(self, target: str):
+        """Volumen actual (0-1) de master, mic o una app; None si no se puede leer."""
+        try:
+            if target == "master":
+                return self.master_level()
+            if target == "mic":
+                mic = AudioUtilities.GetMicrophone()
+                if not mic:
+                    return None
+                mic = getattr(mic, "_dev", mic)
+                interface = mic.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                return interface.QueryInterface(IAudioEndpointVolume).GetMasterVolumeLevelScalar()
+            ctls = self._sessions.get(target, [])
+            return ctls[0].GetMasterVolume() if ctls else None
+        except Exception:
+            return None
+
     def set_app(self, name: str, level: float) -> None:
         failed = False
         for ctl in self._sessions.get(name, []):

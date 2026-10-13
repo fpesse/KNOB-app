@@ -114,6 +114,7 @@ class Controller(QObject):
             system.refresh_startup_path()
         self.audio.start()
         self.focus.start()
+        self._sync_hold_modes()
         self.serial.start()
         threading.Thread(target=self._load_outputs, daemon=True).start()
         threading.Thread(target=self._check_update, daemon=True).start()
@@ -191,6 +192,12 @@ class Controller(QObject):
         except Exception as e:
             log(f"step_master: {e}")
 
+    def get_level(self, target: str):
+        try:
+            return self.audio.get_level(target)
+        except Exception:
+            return None
+
     def cycle_output(self, direction: int) -> None:
         try:
             name = self.outputs.cycle(direction)
@@ -201,9 +208,9 @@ class Controller(QObject):
 
     # --- bucles --------------------------------------------------------------
     def _tick(self) -> None:
-        vals = self.serial.take_latest()
-        if vals is not None:
-            self.engine.on_frame(vals)
+        frame = self.serial.take_latest_frame()
+        if frame is not None:
+            self.engine.on_frame(frame.values, frame.hold_turns)
         self.engine.tick()
         for ch in range(5):
             card = self.window.card_for(ch)
@@ -286,6 +293,7 @@ class Controller(QObject):
     def _save_encoder(self, enc: int, entry: dict) -> None:
         self.engine.encoder_assignments[enc] = dict(entry)
         self._persist(self.config.set_encoder_assignments, self.engine.encoder_assignments)
+        self._sync_hold_modes()
         self.window.overlay.close_overlay()
 
     # --- ajustes y perfiles ----------------------------------------------------------
@@ -351,6 +359,11 @@ class Controller(QObject):
         self.engine.set_assignments(self.config.channel_assignments(), self.config.encoder_assignments())
         self._refresh_cards()
         self._refresh_profiles()
+        self._sync_hold_modes()
+
+    def _sync_hold_modes(self) -> None:
+        """Avisa al firmware qué encoders tienen 'mantener y girar' configurado."""
+        self.serial.set_hold_modes([self.engine.turn_key(e) != "none" for e in range(2)])
 
     def _refresh_profiles(self) -> None:
         names, active = self.config.profile_names(), self.config.active_profile

@@ -67,6 +67,8 @@ class SerialLink(QObject):
         self._ser = None
         self._latest = None
         self._latest_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._hold_modes = (False, False)
 
     def start(self) -> None:
         if self._running:
@@ -84,9 +86,29 @@ class SerialLink(QObject):
                 pass
 
     def take_latest(self):
+        """Valores del último frame sin leer (o None)."""
+        frame = self.take_latest_frame()
+        return frame.values if frame is not None else None
+
+    def take_latest_frame(self):
+        """Último Frame completo sin leer (valores + giro mantenido), o None."""
         with self._latest_lock:
-            vals, self._latest = self._latest, None
-        return vals
+            frame, self._latest = self._latest, None
+        return frame
+
+    def set_hold_modes(self, modes) -> None:
+        """Qué encoders tienen 'mantener y girar'. Se reenvía en cada conexión."""
+        self._hold_modes = tuple(bool(m) for m in modes[:2])
+        ser = self._ser
+        if ser is not None:
+            self._send_hold_modes(ser)
+
+    def _send_hold_modes(self, ser) -> None:
+        try:
+            with self._write_lock:
+                ser.write(protocol.hold_command(self._hold_modes))
+        except Exception as e:
+            log(f"serial: no se pudo enviar el modo de mantener: {e}")
 
     # --- hilo -------------------------------------------------------------
     def _run(self) -> None:
@@ -95,6 +117,7 @@ class SerialLink(QObject):
                 ser = self._search()
                 if ser is not None:
                     self._ser = ser
+                    self._send_hold_modes(ser)
                     self._read_loop(ser)
             except Exception as e:
                 log(f"serial: error inesperado: {e}")
@@ -173,6 +196,6 @@ class SerialLink(QObject):
             if frame is None:
                 continue
             with self._latest_lock:
-                self._latest = frame.values
+                self._latest = frame
             for enc_idx, code in detector.feed(frame.buttons):
                 self.button_event.emit(enc_idx, code)
