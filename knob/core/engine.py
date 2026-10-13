@@ -8,6 +8,8 @@ import math
 import time
 from typing import Callable, Protocol
 
+from knob.core import protocol
+
 SMOOTH_ALPHA = 1          # velocidad del EMA (1 = salta directo al objetivo)
 DEADBAND = 10             # tolerancia de ruido del ADC
 MUTE_THRESHOLD = 15       # raw <= esto -> volumen 0
@@ -218,3 +220,56 @@ class Engine:
             return
         self._dev_switch_ms = now
         self.effects.cycle_output(direction)
+
+    # --- botones de encoders --------------------------------------------
+    def on_button(self, enc_idx: int, code: int) -> None:
+        """code: 1=click, 2=doble click, 3=empieza mantener, 4=termina mantener."""
+        ch = 3 + enc_idx
+        if code == protocol.BTN_CLICK:
+            self._execute(enc_idx, "click")
+        elif code == protocol.BTN_DBLCLICK:
+            self._execute(enc_idx, "dblclick")
+        elif code == protocol.BTN_HELD_START:
+            self.encoder_held[enc_idx] = True
+            if self.turn_key(enc_idx) != "none":
+                self.hold_saved[enc_idx] = self.smooth_vals[ch]
+        elif code == protocol.BTN_HELD_END:
+            self.encoder_held[enc_idx] = False
+            if self.turn_key(enc_idx) != "none" and self.hold_saved[enc_idx] is not None:
+                self.smooth_vals[ch] = self.hold_saved[enc_idx]
+                self.target_vals[ch] = self.hold_saved[enc_idx]
+            self.hold_saved[enc_idx] = None
+            self.enc_prev_raw[enc_idx] = None
+
+    def _execute(self, enc_idx: int, action_type: str) -> None:
+        entry = self.encoder_assignments[enc_idx]
+        action = entry.get(action_type, "none")
+        if action == "none":
+            return
+        ch = 3 + enc_idx
+        if action == "mute":
+            assignment = self.channel_assignments.get(ch)
+            if not assignment:
+                return
+            if not self.dial_muted[enc_idx]:
+                self.dial_saved_val[enc_idx] = max(self.smooth_vals[ch], 16.0)
+                self.smooth_vals[ch] = 0.0
+                self.target_vals[ch] = 0.0
+                self.dial_muted[enc_idx] = True
+                self.apply_key(assignment, 0)
+            else:
+                self.dial_muted[enc_idx] = False
+                saved = self.dial_saved_val[enc_idx]
+                self.smooth_vals[ch] = saved
+                self.target_vals[ch] = saved
+                self.apply_key(assignment, saved)
+        elif action in ("play_pause", "next_track", "prev_track"):
+            self.effects.media_key(action)
+        elif action == "vol_up":
+            self.effects.step_master(MASTER_STEP)
+        elif action == "vol_down":
+            self.effects.step_master(-MASTER_STEP)
+        elif action == "hotkey":
+            combo = entry.get(f"hotkey_keys_{action_type}", "")
+            if combo:
+                self.effects.send_hotkey(combo)
