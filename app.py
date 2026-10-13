@@ -2,6 +2,9 @@ import os
 import sys
 import json
 import winreg
+import subprocess
+import tempfile
+import urllib.request
 import customtkinter
 import tkinter as tk
 import serial
@@ -291,12 +294,110 @@ content_knob = customtkinter.CTkFrame(left_panel, fg_color="transparent")
 content_config = customtkinter.CTkFrame(left_panel, fg_color="transparent")
 content_knob.pack(fill="both", expand=True, padx=4, pady=4)  # KNOB shown by default
 
+def _read_version():
+    try:
+        if getattr(sys, "frozen", False):
+            # Primero busca en el directorio del exe (donde lo copia el instalador)
+            exe_dir = os.path.dirname(sys.executable)
+            path = os.path.join(exe_dir, "version.txt")
+            if not os.path.exists(path):
+                path = os.path.join(sys._MEIPASS, "version.txt")
+        else:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version.txt")
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return "v?.?.?"
+APP_VERSION = _read_version()
+_RELEASES_URL = "https://api.github.com/repos/fpesse/KNOB-app/releases/latest"
+
+btn_version = customtkinter.CTkLabel(
+    left_panel, text=APP_VERSION,
+    font=customtkinter.CTkFont(size=10),
+    cursor="arrow"
+)
+btn_version.pack(side="bottom", pady=(0, 8))
+
+def _parse_version(v):
+    try:
+        return tuple(int(x) for x in v.lstrip("v").split("."))
+    except Exception:
+        return (0,)
+
+def _check_for_update():
+    try:
+        req = urllib.request.Request(
+            _RELEASES_URL,
+            headers={"User-Agent": "KNOB-App", "Accept": "application/vnd.github+json"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+        latest_tag  = data.get("tag_name", "")
+        asset_url   = next(
+            (a["browser_download_url"] for a in data.get("assets", [])
+             if a["name"].endswith(".exe")), None
+        )
+        if not asset_url:
+            return
+        if _parse_version(latest_tag) > _parse_version(APP_VERSION):
+            root.after(0, lambda: _show_update_available(latest_tag, asset_url))
+    except Exception:
+        pass
+
+def _show_update_available(latest_tag, asset_url):
+    t = THEMES[current_theme]
+    btn_version.configure(
+        text=f"↑ {latest_tag} disponible",
+        fg_color=t["accent"],
+        text_color=t["text"], cursor="hand2"
+    )
+    btn_version.bind("<Button-1>", lambda e: _start_download(latest_tag, asset_url))
+
+def _start_download(latest_tag, asset_url):
+    t = THEMES[current_theme]
+    btn_version.unbind("<Button-1>")
+    btn_version.configure(text="Descargando 0%",
+                          fg_color=t["btn_un"], cursor="arrow")
+    def download():
+        try:
+            tmp = tempfile.mktemp(suffix=".exe", prefix="KNOB_update_")
+            with urllib.request.urlopen(asset_url, timeout=60) as r:
+                total = int(r.headers.get("Content-Length", 0))
+                downloaded = 0
+                chunk = 65536
+                with open(tmp, "wb") as f:
+                    while True:
+                        buf = r.read(chunk)
+                        if not buf:
+                            break
+                        f.write(buf)
+                        downloaded += len(buf)
+                        if total:
+                            pct = int(downloaded * 100 / total)
+                            root.after(0, lambda p=pct: btn_version.configure(
+                                text=f"Descargando {p}%"))
+            root.after(0, lambda: _launch_installer(tmp))
+        except Exception as e:
+            root.after(0, lambda: btn_version.configure(text="Error al descargar"))
+    threading.Thread(target=download, daemon=True).start()
+
+def _launch_installer(path):
+    os.startfile(path)
+    root.after(500, on_close)
+
 # KNOB tab: connection status label
 lbl_status_knob = customtkinter.CTkLabel(
     content_knob, text="Buscando\nKNOB...",
     font=customtkinter.CTkFont(size=11), justify="center"
 )
 lbl_status_knob.pack(pady=(20, 0))
+
+lbl_audio_device = customtkinter.CTkLabel(
+    content_knob, text="",
+    font=customtkinter.CTkFont(size=9), justify="center",
+    wraplength=120
+)
+lbl_audio_device.pack(pady=(4, 0))
 
 def _update_tab_buttons():
     t = THEMES[current_theme]
@@ -387,14 +488,160 @@ def _ui_set_buscando():
 SMOOTH_ALPHA    = 1   # EMA speed: 0.5 → halves distance every 16ms (~48ms to settle)
 DEADBAND        = 10     # ADC noise tolerance — ignore changes smaller than ±3 units
 MUTE_THRESHOLD  = 15    # raw values ≤ this → apply 0 (true mute, avoids lingering 1-2)
+
+def raw_to_level(raw_val: float) -> float:
+    """Convert raw ADC value (0-1023) to audio level using a logarithmic curve.
+    x^2 matches human loudness perception: fine control at low volumes, natural feel at high."""
+    if raw_val <= MUTE_THRESHOLD:
+        return 0.0
+    linear = max(0.0, min(1.0, raw_val / 1023.0))
+    return linear * linear   # square law ≈ perceptual loudness
 smooth_vals = [512.0] * 5
 target_vals = [512.0] * 5
+_dial_muted    = [False, False]   # True when dial is muted via button press
+_dial_saved_val = [512.0, 512.0]  # smooth_val saved before button-mute
 
 _last_vol_ms = 0   # timestamp of last volume API call (monotonic ms)
 VOL_RATE_MS   = 40  # call audio API at most every 40ms (25Hz) to avoid blocking UI
 
+# ── Focus priority tracking ("last mover wins") ────────────────────────────
+# Maps app_name → "direct" | "focus". Whichever moved last controls that app.
+_channel_priority: dict = {}
+_last_raw_per_channel: list = [None] * 5   # last raw_val seen per channel
+_focus_took_at: dict = {}   # app → raw_val of its direct channel when focus took priority
+_focus_prev_raw: float = None  # last raw_val of the focus channel (to detect actual movement)
+
+# ── Audio output device switching ─────────────────────────────────────────
+_output_devices   = []        # [(device_id, friendly_name), ...]
+_output_dev_idx   = 0         # index of current default device
+_dev_switch_ms    = 0         # debounce timestamp
+_enc_prev_raw     = [None, None]  # previous encoder value per encoder (for direction)
+_enc_hold_saved   = [None, None]  # smooth_val saved when button is pressed (for restore on release)
+
+# ── Focus tracking ─────────────────────────────────────────────────────────
+_last_focus_exe: str = ""     # last non-KNOB foreground exe
+
+def _focus_tracker():
+    """Background thread: polls foreground window every 150ms, caches last non-KNOB exe."""
+    global _last_focus_exe
+    own_pid = os.getpid()
+    while True:
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if hwnd:
+                pid = ctypes.c_ulong()
+                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value != own_pid:
+                    exe = strip_exe(psutil.Process(pid.value).name()).capitalize()
+                    if exe:
+                        _last_focus_exe = exe
+        except Exception:
+            pass
+        time.sleep(0.15)
+
+threading.Thread(target=_focus_tracker, daemon=True).start()
+
+def _get_device_friendly_name(device_id: str) -> str:
+    """Build full name like 'Speakers (UG-08S)' from registry properties."""
+    try:
+        guid = device_id.rsplit('.', 1)[-1]
+        key_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\{guid}\Properties"
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0,
+                             winreg.KEY_READ | 0x0100)
+        endpoint, _ = winreg.QueryValueEx(key, "{a45c254e-df1c-4efd-8020-67d146a850e0},2")
+        try:
+            device, _ = winreg.QueryValueEx(key, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")
+            name = f"{endpoint} ({device})"
+        except Exception:
+            name = endpoint
+        winreg.CloseKey(key)
+        return name
+    except Exception:
+        return None
+
+def _load_output_devices():
+    global _output_devices, _output_dev_idx
+    try:
+        enumerator = AudioUtilities.GetDeviceEnumerator()
+        collection = enumerator.EnumAudioEndpoints(0, 1)  # eRender=0, ACTIVE=1
+        devs = []
+        for i in range(collection.GetCount()):
+            dev = collection.Item(i)
+            dev_id = dev.GetId()
+            name = _get_device_friendly_name(dev_id) or f"Dispositivo {i+1}"
+            devs.append((dev_id, name))
+        _output_devices = devs
+        try:
+            default_id = enumerator.GetDefaultAudioEndpoint(0, 1).GetId()
+            for i, (did, name) in enumerate(_output_devices):
+                if did == default_id:
+                    _output_dev_idx = i
+                    root.after(0, lambda n=name: _update_device_label(n))
+                    break
+        except Exception:
+            pass
+    except Exception as e:
+        _log(f"_load_output_devices: {e}")
+
+def _set_default_output_device(device_id: str):
+    """Switch default audio output via undocumented IPolicyConfig COM interface."""
+    try:
+        from comtypes import GUID as _GUID
+        clsid      = _GUID('{870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}')
+        iid_unk    = _GUID('{00000000-0000-0000-C000-000000000046}')
+        iid_policy = _GUID('{F8679F50-850A-41CF-9C72-430F290290C8}')
+        # 1. Create COM object
+        unk_ptr = ctypes.POINTER(ctypes.c_void_p)()
+        hr = ctypes.windll.ole32.CoCreateInstance(
+            ctypes.byref(clsid), None, 1,
+            ctypes.byref(iid_unk), ctypes.byref(unk_ptr))
+        if hr != 0:
+            return
+        # 2. QI for IPolicyConfig to get the correct vtable
+        vtable_unk = ctypes.cast(unk_ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+        QI = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT, ctypes.c_void_p, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p))(vtable_unk[0])
+        policy_ptr = ctypes.c_void_p()
+        hr = QI(ctypes.cast(unk_ptr, ctypes.c_void_p).value,
+                ctypes.addressof(iid_policy), ctypes.byref(policy_ptr))
+        if hr != 0 or not policy_ptr:
+            return
+        # 3. Call SetDefaultEndpoint (vtable index 13)
+        vtable = ctypes.cast(policy_ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+        SetDefaultEndpoint = ctypes.WINFUNCTYPE(
+            ctypes.HRESULT, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint)(vtable[13])
+        for role in range(3):
+            SetDefaultEndpoint(policy_ptr.value, device_id, role)
+        ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])(policy_ptr.value)
+    except Exception as e:
+        _log(f"_set_default_output_device: {e}")
+
+def _update_device_label(name: str, highlight: bool = False):
+    lbl_audio_device.configure(text=name)
+    if highlight:
+        lbl_audio_device.configure(text_color="#FFFFFF")
+        root.after(1500, lambda: lbl_audio_device.configure(
+            text_color=THEMES[current_theme]["text_dim"]))
+
+def _cycle_output_device(direction: int):
+    global _output_dev_idx, _dev_switch_ms
+    if not _output_devices:
+        return
+    now_ms = time.monotonic() * 1000
+    if now_ms - _dev_switch_ms < 800:
+        return
+    _dev_switch_ms = now_ms
+    _output_dev_idx = (_output_dev_idx + direction) % len(_output_devices)
+    dev_id, dev_name = _output_devices[_output_dev_idx]
+    threading.Thread(target=_set_default_output_device, args=(dev_id,), daemon=True).start()
+    root.after(0, lambda n=dev_name: _update_device_label(n, highlight=True))
+
+def _show_device_toast(name: str):
+    pass  # replaced by sidebar label highlight
+
 def _apply_volume_by_key(key, raw_val):
-    level = 0.0 if raw_val <= MUTE_THRESHOLD else max(0.0, min(1.0, raw_val / 1023.0))
+    level = raw_to_level(raw_val)
     try:
         if key == "master":
             set_master_volume(level)
@@ -413,8 +660,11 @@ def _apply_ui_from_smooth():
     slider1.set(smooth_vals[0])
     slider2.set(smooth_vals[1])
     slider3.set(smooth_vals[2])
-    knob_izquierda.set(smooth_vals[3] / 1023 * 100)
-    knob_derecha.set(smooth_vals[4] / 1023 * 100)
+    # Freeze dial UI while held with a non-none click_turn action
+    _knob_val_0 = _enc_hold_saved[0] if (encoder_held[0] and encoder_assignments[0].get("click_turn","none") != "none" and _enc_hold_saved[0] is not None) else smooth_vals[3]
+    _knob_val_1 = _enc_hold_saved[1] if (encoder_held[1] and encoder_assignments[1].get("click_turn","none") != "none" and _enc_hold_saved[1] is not None) else smooth_vals[4]
+    knob_izquierda.set(_knob_val_0 / 1023 * 100)
+    knob_derecha.set(_knob_val_1 / 1023 * 100)
     # Volume API (pycaw COM calls) throttled to 25 Hz to keep main thread free
     now_ms = time.monotonic() * 1000
     if now_ms - _last_vol_ms < VOL_RATE_MS:
@@ -426,7 +676,17 @@ def _apply_ui_from_smooth():
             enc_idx = i - 3
             if encoder_held[enc_idx]:
                 turn_key = encoder_assignments[enc_idx].get("click_turn", "none")
-                if turn_key != "none":
+                if turn_key == "output_device":
+                    curr = target_vals[i]   # raw hardware value, not frozen
+                    prev = _enc_prev_raw[enc_idx]
+                    if prev is not None and abs(curr - prev) > 35:
+                        _cycle_output_device(1 if curr > prev else -1)
+                    _enc_prev_raw[enc_idx] = curr
+                    continue
+                elif turn_key == "none":
+                    _enc_prev_raw[enc_idx] = None
+                else:
+                    _enc_prev_raw[enc_idx] = None
                     _apply_volume_by_key(turn_key, smooth_vals[i])
                     continue
         apply_volume(i, smooth_vals[i])
@@ -488,6 +748,10 @@ def poll_ui():
         latest_vals = None
     if vals is not None:
         for i in range(5):
+            # If this dial is button-muted, ignore physical movement
+            if i >= 3 and _dial_muted[i - 3]:
+                target_vals[i] = 0.0
+                continue
             new = float(vals[i])
             # Deadband: only update target when the physical change is real (not ADC noise)
             if abs(new - target_vals[i]) >= DEADBAND:
@@ -495,6 +759,27 @@ def poll_ui():
     # EMA: move smooth_vals toward target_vals each frame
     needs_update = False
     for i in range(5):
+        # Keep muted dials pinned at 0
+        if i >= 3 and _dial_muted[i - 3]:
+            if smooth_vals[i] != 0.0:
+                smooth_vals[i] = 0.0
+                needs_update = True
+            continue
+        # Freeze encoder dial while held with a non-none click_turn action
+        if i >= 3:
+            enc_idx = i - 3
+            try:
+                held = encoder_held[enc_idx]
+                ct_key = encoder_assignments[enc_idx].get("click_turn", "none")
+            except Exception:
+                held = False
+                ct_key = "none"
+            if held and ct_key != "none":
+                saved = _enc_hold_saved[enc_idx]
+                if saved is not None:
+                    smooth_vals[i] = saved  # freeze UI/audio only, NOT target_vals
+                needs_update = True  # force _apply_ui_from_smooth while held
+                continue
         diff = target_vals[i] - smooth_vals[i]
         if abs(diff) < 0.5:
             if smooth_vals[i] != target_vals[i]:
@@ -668,10 +953,15 @@ slider3.place(x=528, y=160)
 
 # Block all mouse interaction on sliders — hardware-only control
 def _block_mouse(_event): return "break"
+_BLOCK_EVENTS = ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>",
+                 "<Button-2>", "<B2-Motion>", "<Button-3>", "<MouseWheel>")
 for _sl in (slider1, slider2, slider3):
-    for _ev in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>",
-                "<Button-2>", "<B2-Motion>", "<MouseWheel>"):
+    for _ev in _BLOCK_EVENTS:
         _sl.bind(_ev, _block_mouse)
+    # Also block on the internal canvas that customtkinter uses
+    if hasattr(_sl, "_canvas"):
+        for _ev in _BLOCK_EVENTS:
+            _sl._canvas.bind(_ev, _block_mouse)
 
 # --- VU METERS (placed to the right of each slider, 4px gap) ---
 vu1 = VUMeter(root, width=8, height=400)
@@ -764,6 +1054,7 @@ _mic_meter    = None        # cached IAudioMeterInformation for microphone
 
 # --- APP ICON CACHE ---
 _icon_cache: dict = {}      # {app_name: CTkImage | None}
+_icon_cache_is_letter: set = set()  # apps cuyo icono es letra (pendiente de reintento)
 
 class _SHFILEINFOW(ctypes.Structure):
     _fields_ = [("hIcon", ctypes.c_void_p), ("iIcon", ctypes.c_int),
@@ -810,26 +1101,55 @@ def _get_app_ctk_icon(app_name: str, size: int = 18):
     if app_name in _icon_cache:
         return _icon_cache[app_name]
     img = None
+    exe_path = None
+    # Buscar proceso corriendo
     try:
         for proc in psutil.process_iter(['name', 'exe']):
             try:
                 if strip_exe(proc.info.get('name', '')).lower() == app_name.lower() and proc.info.get('exe'):
-                    sfi = _SHFILEINFOW()
-                    if ctypes.windll.shell32.SHGetFileInfoW(
-                            proc.info['exe'], 0, ctypes.byref(sfi),
-                            ctypes.sizeof(sfi), 0x100 | 0x1):   # SHGFI_ICON | SHGFI_SMALLICON
-                        img = _hicon_to_pil(sfi.hIcon, size)
-                        ctypes.windll.user32.DestroyIcon(ctypes.c_void_p(sfi.hIcon))
+                    exe_path = proc.info['exe']
                     break
             except Exception:
                 continue
     except Exception:
         pass
+    # Si no está corriendo, usar path guardado en config
+    if not exe_path:
+        exe_path = config.get("exe_paths", {}).get(app_name.lower())
+    # Extraer ícono del exe
+    if exe_path and os.path.exists(exe_path):
+        try:
+            sfi = _SHFILEINFOW()
+            if ctypes.windll.shell32.SHGetFileInfoW(
+                    exe_path, 0, ctypes.byref(sfi),
+                    ctypes.sizeof(sfi), 0x100 | 0x1):
+                img = _hicon_to_pil(sfi.hIcon, size)
+                ctypes.windll.user32.DestroyIcon(ctypes.c_void_p(sfi.hIcon))
+            # Guardar path en config para próximas veces
+            if "exe_paths" not in config:
+                config["exe_paths"] = {}
+            config["exe_paths"][app_name.lower()] = exe_path
+            save_config(config)
+        except Exception:
+            pass
     if img is None:
         img = _letter_icon(app_name, size)
+        _icon_cache_is_letter.add(app_name)
+    else:
+        _icon_cache_is_letter.discard(app_name)
     ctk_img = customtkinter.CTkImage(light_image=img, dark_image=img, size=(size, size))
     _icon_cache[app_name] = ctk_img
     return ctk_img
+
+
+def _retry_letter_icons():
+    """Reintenta cargar íconos reales para apps que quedaron con letra."""
+    for app_name in list(_icon_cache_is_letter):
+        _icon_cache.pop(app_name, None)
+        _get_app_ctk_icon(app_name)
+    # Programar próximo reintento si quedan letras pendientes
+    if _icon_cache_is_letter:
+        root.after(10000, _retry_letter_icons)
 
 def _refresh_session_cache():
     global _session_cache, _meter_cache, _cache_ts, _master_meter, _mic_meter
@@ -888,10 +1208,7 @@ def _get_channel_meter_level(channel_idx: int) -> float:
         if assignment == "mic":
             return _mic_meter.GetPeakValue() if _mic_meter else 0.0
         if assignment == "focus":
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
-            pid  = ctypes.c_ulong()
-            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            exe_lower = strip_exe(psutil.Process(pid.value).name()).lower()
+            exe_lower = _last_focus_exe.lower()
             m = next((v for k, v in _meter_cache.items() if k.lower() == exe_lower), None)
             return m.GetPeakValue() if m else 0.0
         meters = _meter_cache.get(assignment, [])
@@ -949,35 +1266,49 @@ def set_app_volume(display_name, level):
     if failed:
         _invalidate_cache()   # session died — rescan next tick
 
-def set_focus_app_volume(level):
-    hwnd = ctypes.windll.user32.GetForegroundWindow()
-    pid = ctypes.c_ulong()
-    ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    try:
-        exe = strip_exe(psutil.Process(pid.value).name())
-        # Skip if this app is already directly assigned to another channel
-        direct_apps = {v for v in channel_assignments.values()
-                       if v and v not in ("master", "mic", "focus")}
-        if exe in direct_apps:
-            return
+def set_focus_app_volume(level, raw_val=None):
+    global _focus_prev_raw
+    exe = _last_focus_exe
+    if not exe:
+        _focus_prev_raw = raw_val
+        return
+    # Only claim priority if the focus slider is actually moving
+    focus_moving = raw_val is not None and (
+        _focus_prev_raw is None or abs(raw_val - _focus_prev_raw) > 15
+    )
+    _focus_prev_raw = raw_val
+    if focus_moving and _channel_priority.get(exe) != "focus":
+        # Record where the direct slider was so we can detect when user moves it back
+        for ch, app in channel_assignments.items():
+            if app == exe and _last_raw_per_channel[ch] is not None:
+                _focus_took_at[exe] = _last_raw_per_channel[ch]
+                break
+        _channel_priority[exe] = "focus"
+    if _channel_priority.get(exe, "direct") == "focus":
         set_app_volume(exe, level)
-    except Exception:
-        pass
 
 def apply_volume(channel_idx, raw_val):
     assignment = channel_assignments.get(channel_idx)
     if not assignment:
         return
-    level = 0.0 if raw_val <= MUTE_THRESHOLD else max(0.0, min(1.0, raw_val / 1023.0))
+    level = raw_to_level(raw_val)
     try:
         if assignment == "master":
             set_master_volume(level)
         elif assignment == "mic":
             set_mic_volume(level)
         elif assignment == "focus":
-            set_focus_app_volume(level)
+            set_focus_app_volume(level, raw_val)
         else:
-            set_app_volume(assignment, level)
+            _last_raw_per_channel[channel_idx] = raw_val
+            if _channel_priority.get(assignment, "direct") == "focus":
+                # Reclaim direct priority if slider moved >40 units from when focus took over
+                ref = _focus_took_at.get(assignment)
+                if ref is not None and abs(raw_val - ref) > 40:
+                    _channel_priority[assignment] = "direct"
+                    _focus_took_at.pop(assignment, None)
+            if _channel_priority.get(assignment, "direct") == "direct":
+                set_app_volume(assignment, level)
     except Exception as e:
         print(f"[DEBUG] Volume ch{channel_idx}: {e}")
 
@@ -991,13 +1322,15 @@ ENCODER_CLICK_ACTIONS = [
     ("prev_track", "Pista anterior"),
     ("vol_up",     "Vol. Maestro +5%"),
     ("vol_down",   "Vol. Maestro -5%"),
+    ("hotkey",     "Atajo de teclado"),
 ]
 # Actions for click+turn (which channel to control while held)
 ENCODER_TURN_CHANNELS = [
-    ("none",   "Canal asignado (normal)"),
-    ("master", "Volumen General"),
-    ("mic",    "Microfono"),
-    ("focus",  "App en Focus"),
+    ("none",          "Canal asignado (normal)"),
+    ("master",        "Volumen General"),
+    ("mic",           "Microfono"),
+    ("focus",         "App en Focus"),
+    ("output_device", "Cambiar salida de audio"),
 ]
 ENCODER_NAMES = ["Enc. Izq.", "Enc. Der."]
 ACTION_TYPES = [
@@ -1007,11 +1340,13 @@ ACTION_TYPES = [
 ]
 
 _saved_enc = _active_profile_data.get("encoder_assignments", [{}, {}])
-encoder_assignments = [
-    {atype: _saved_enc[i].get(atype, "none") if i < len(_saved_enc) else "none"
-     for atype, _ in ACTION_TYPES}
-    for i in range(2)
-]
+encoder_assignments = []
+for _i in range(2):
+    _d = _saved_enc[_i] if _i < len(_saved_enc) else {}
+    _entry = {atype: _d.get(atype, "none") for atype, _ in ACTION_TYPES}
+    _entry["hotkey_keys_click"]    = _d.get("hotkey_keys_click", "")
+    _entry["hotkey_keys_dblclick"] = _d.get("hotkey_keys_dblclick", "")
+    encoder_assignments.append(_entry)
 encoder_held = [False, False]
 enc_config_buttons = []
 
@@ -1034,6 +1369,46 @@ def _send_media_key(vk):
     ctypes.windll.user32.keybd_event(vk, 0, _KEYEVENTF_EXTENDEDKEY, 0)
     ctypes.windll.user32.keybd_event(vk, 0, _KEYEVENTF_EXTENDEDKEY | _KEYEVENTF_KEYUP, 0)
 
+_VK_MAP = {
+    'ctrl': 0x11, 'shift': 0x10, 'alt': 0x12, 'win': 0x5B,
+    'space': 0x20, 'enter': 0x0D, 'return': 0x0D, 'esc': 0x1B, 'escape': 0x1B,
+    'tab': 0x09, 'backspace': 0x08, 'delete': 0x2E, 'insert': 0x2D,
+    'home': 0x24, 'end': 0x23, 'pageup': 0x21, 'prior': 0x21,
+    'pagedown': 0x22, 'next': 0x22,
+    'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
+    'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73, 'f5': 0x74,
+    'f6': 0x75, 'f7': 0x76, 'f8': 0x77, 'f9': 0x78, 'f10': 0x79,
+    'f11': 0x7A, 'f12': 0x7B,
+}
+
+def _send_hotkey(hotkey_str):
+    if not hotkey_str:
+        return
+    parts = [p.strip().lower() for p in hotkey_str.split('+')]
+    MOD_ORDER = ['ctrl', 'shift', 'alt', 'win']
+    modifiers = [p for p in parts if p in MOD_ORDER]
+    main_keys = [p for p in parts if p not in MOD_ORDER]
+    if not main_keys:
+        return
+    def get_vk(key):
+        if key in _VK_MAP:
+            return _VK_MAP[key]
+        if len(key) == 1:
+            return ctypes.windll.user32.VkKeyScanW(ord(key)) & 0xFF
+        return None
+    try:
+        for mod in modifiers:
+            ctypes.windll.user32.keybd_event(_VK_MAP[mod], 0, 0, 0)
+        for k in main_keys:
+            vk = get_vk(k)
+            if vk:
+                ctypes.windll.user32.keybd_event(vk, 0, _KEYEVENTF_EXTENDEDKEY, 0)
+                ctypes.windll.user32.keybd_event(vk, 0, _KEYEVENTF_EXTENDEDKEY | _KEYEVENTF_KEYUP, 0)
+        for mod in reversed(modifiers):
+            ctypes.windll.user32.keybd_event(_VK_MAP[mod], 0, _KEYEVENTF_KEYUP, 0)
+    except Exception as e:
+        print(f"[DEBUG] send_hotkey error: {e}")
+
 def _toggle_mute_by_assignment(assignment):
     try:
         if assignment == "master":
@@ -1046,11 +1421,7 @@ def _toggle_mute_by_assignment(assignment):
                 vol = interface.QueryInterface(IAudioEndpointVolume)
                 vol.SetMute(not vol.GetMute(), None)
         elif assignment == "focus":
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
-            pid = ctypes.c_ulong()
-            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            exe = psutil.Process(pid.value).name()
-            _mute_app(strip_exe(exe))
+            _mute_app(_last_focus_exe)
         else:
             _mute_app(assignment)
     except Exception as e:
@@ -1071,7 +1442,28 @@ def execute_encoder_action(enc_idx, action_type):
         if action == "mute":
             assignment = channel_assignments.get(3 + enc_idx)
             if assignment:
-                _toggle_mute_by_assignment(assignment)
+                if not _dial_muted[enc_idx]:
+                    # Mute: save position, snap dial to 0, freeze physical input
+                    _dial_saved_val[enc_idx] = max(smooth_vals[3 + enc_idx], 16.0)
+                    smooth_vals[3 + enc_idx] = 0.0
+                    target_vals[3 + enc_idx] = 0.0
+                    _dial_muted[enc_idx] = True
+                    root.after(0, update_channel_buttons)
+                    root.after(0, _apply_ui_from_smooth)
+                    threading.Thread(
+                        target=_apply_volume_by_key, args=(assignment, 0), daemon=True
+                    ).start()
+                else:
+                    # Unmute: restore saved position
+                    _dial_muted[enc_idx] = False
+                    saved = _dial_saved_val[enc_idx]
+                    smooth_vals[3 + enc_idx] = saved
+                    target_vals[3 + enc_idx] = saved
+                    root.after(0, update_channel_buttons)
+                    root.after(0, _apply_ui_from_smooth)
+                    threading.Thread(
+                        target=_apply_volume_by_key, args=(assignment, saved), daemon=True
+                    ).start()
         elif action == "play_pause":
             _send_media_key(_VK_MEDIA_PLAY_PAUSE)
         elif action == "next_track":
@@ -1084,6 +1476,10 @@ def execute_encoder_action(enc_idx, action_type):
         elif action == "vol_down":
             ep = AudioUtilities.GetSpeakers().EndpointVolume
             set_master_volume(max(0.0, ep.GetMasterVolumeLevelScalar() - 0.05))
+        elif action == "hotkey":
+            hk_str = encoder_assignments[enc_idx].get(f"hotkey_keys_{action_type}", "")
+            if hk_str:
+                threading.Thread(target=_send_hotkey, args=(hk_str,), daemon=True).start()
     except Exception as e:
         print(f"[DEBUG] Encoder action error: {e}")
 
@@ -1097,16 +1493,28 @@ def handle_button_event(enc_idx, event_code):
         execute_encoder_action(enc_idx, "dblclick")
     elif event_code == 3:
         encoder_held[enc_idx] = True
+        turn_key = encoder_assignments[enc_idx].get("click_turn", "none")
+        if turn_key != "none":
+            _enc_hold_saved[enc_idx] = smooth_vals[3 + enc_idx]
     elif event_code == 4:
         encoder_held[enc_idx] = False
+        turn_key = encoder_assignments[enc_idx].get("click_turn", "none")
+        if turn_key != "none" and _enc_hold_saved[enc_idx] is not None:
+            smooth_vals[3 + enc_idx] = _enc_hold_saved[enc_idx]
+            target_vals[3 + enc_idx] = _enc_hold_saved[enc_idx]
+        _enc_hold_saved[enc_idx] = None
+        _enc_prev_raw[enc_idx] = None
 
 def open_encoder_config(enc_idx):
     t = THEMES[current_theme]
     win = customtkinter.CTkToplevel(root)
     win.title(f"Configurar {ENCODER_NAMES[enc_idx]}")
-    win.geometry("310x260")
+    win.geometry("310x280")
     win.resizable(False, False)
     win.grab_set()
+    win.lift()
+    win.attributes('-topmost', True)
+    win.after(150, lambda: win.attributes('-topmost', False))
     win.configure(fg_color=t["bg"])
 
     customtkinter.CTkLabel(
@@ -1116,14 +1524,22 @@ def open_encoder_config(enc_idx):
     ).pack(pady=(12, 8))
 
     dropdown_vars = {}
+    hotkey_vars   = {}   # atype -> StringVar with recorded combo
     click_labels  = [v for _, v in ENCODER_CLICK_ACTIONS]
     turn_labels   = [v for _, v in ENCODER_TURN_CHANNELS]
     click_key_map = {v: k for k, v in ENCODER_CLICK_ACTIONS}
     turn_key_map  = {v: k for k, v in ENCODER_TURN_CHANNELS}
 
+    MOD_KEYS  = {'Control_L','Control_R','Shift_L','Shift_R','Alt_L','Alt_R','Super_L','Super_R'}
+    MOD_NAMES = {'Control_L':'ctrl','Control_R':'ctrl','Shift_L':'shift','Shift_R':'shift',
+                 'Alt_L':'alt','Alt_R':'alt','Super_L':'win','Super_R':'win'}
+
     for atype, alabel in ACTION_TYPES:
-        row = customtkinter.CTkFrame(win, fg_color="transparent")
-        row.pack(fill="x", padx=14, pady=4)
+        container = customtkinter.CTkFrame(win, fg_color="transparent")
+        container.pack(fill="x")
+
+        row = customtkinter.CTkFrame(container, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=(4, 0))
         customtkinter.CTkLabel(
             row, text=alabel, width=115, anchor="w",
             text_color=t["text"], font=customtkinter.CTkFont(size=12)
@@ -1134,21 +1550,83 @@ def open_encoder_config(enc_idx):
             cur_key = encoder_assignments[enc_idx].get(atype, "none")
             cur_label = next((v for k, v in ENCODER_TURN_CHANNELS if k == cur_key),
                              ENCODER_TURN_CHANNELS[0][1])
+            var = customtkinter.StringVar(value=cur_label)
+            dropdown_vars[atype] = var
+            customtkinter.CTkOptionMenu(
+                row, values=opts, variable=var, width=170,
+                fg_color=t["btn_un"], button_color=t["accent"],
+                button_hover_color=t["accent_hover"], text_color=t["text"],
+                dropdown_fg_color=t["bg_mid"], dropdown_text_color=t["text"],
+                dropdown_hover_color=t["accent"]
+            ).pack(side="left")
         else:
             opts = click_labels
             cur_key = encoder_assignments[enc_idx].get(atype, "none")
             cur_label = next((v for k, v in ENCODER_CLICK_ACTIONS if k == cur_key),
                              ENCODER_CLICK_ACTIONS[0][1])
+            var = customtkinter.StringVar(value=cur_label)
+            dropdown_vars[atype] = var
 
-        var = customtkinter.StringVar(value=cur_label)
-        dropdown_vars[atype] = var
-        customtkinter.CTkOptionMenu(
-            row, values=opts, variable=var, width=170,
-            fg_color=t["btn_un"], button_color=t["accent"],
-            button_hover_color=t["accent_hover"], text_color=t["text"],
-            dropdown_fg_color=t["bg_mid"], dropdown_text_color=t["text"],
-            dropdown_hover_color=t["accent"]
-        ).pack(side="left")
+            hk_key = f"hotkey_keys_{atype}"
+            hk_str = encoder_assignments[enc_idx].get(hk_key, "")
+            hk_var = customtkinter.StringVar(value=hk_str)
+            hotkey_vars[atype] = hk_var
+
+            # Hotkey recorder row (shown only when "Atajo de teclado" is selected)
+            hk_row = customtkinter.CTkFrame(container, fg_color="transparent")
+            btn_label = hk_str if hk_str else "Grabar atajo..."
+            grabar_btn = customtkinter.CTkButton(
+                hk_row, text=btn_label, width=170, height=28,
+                fg_color=t["btn_un"], hover_color=t["accent_hover"],
+                text_color=t["text"], font=customtkinter.CTkFont(size=11)
+            )
+            grabar_btn.pack(side="left", padx=(119, 0))
+
+            def make_capture(at, hkv, gbtn):
+                def start_capture():
+                    gbtn.configure(text="Presioná las teclas...", fg_color=t["accent"])
+                    win.focus_force()
+                    pressed_mods = set()
+                    def on_key(e):
+                        if e.keysym in MOD_KEYS:
+                            pressed_mods.add(MOD_NAMES[e.keysym])
+                            return
+                        win.unbind('<KeyPress>')
+                        main = e.keysym.lower()
+                        order = ['ctrl','shift','alt','win']
+                        parts = [m for m in order if m in pressed_mods] + [main]
+                        combo = '+'.join(parts)
+                        hkv.set(combo)
+                        gbtn.configure(text=combo, fg_color=t["btn_un"])
+                    win.bind('<KeyPress>', on_key)
+                return start_capture
+
+            grabar_btn.configure(command=make_capture(atype, hk_var, grabar_btn))
+
+            def make_dd_callback(hkrow, hkv):
+                def on_change(label):
+                    key = click_key_map.get(label, "none")
+                    if key == "hotkey":
+                        hkrow.pack(fill="x", padx=14, pady=(0, 4))
+                        win.geometry(f"310x{win.winfo_height() + 38}")
+                    else:
+                        if hkrow.winfo_ismapped():
+                            hkrow.pack_forget()
+                            win.geometry(f"310x{max(280, win.winfo_height() - 38)}")
+                return on_change
+
+            customtkinter.CTkOptionMenu(
+                row, values=opts, variable=var, width=170,
+                command=make_dd_callback(hk_row, hk_var),
+                fg_color=t["btn_un"], button_color=t["accent"],
+                button_hover_color=t["accent_hover"], text_color=t["text"],
+                dropdown_fg_color=t["bg_mid"], dropdown_text_color=t["text"],
+                dropdown_hover_color=t["accent"]
+            ).pack(side="left")
+
+            if cur_key == "hotkey":
+                hk_row.pack(fill="x", padx=14, pady=(0, 4))
+                win.geometry(f"310x{280 + 38}")
 
     def save_and_close():
         for atype, var in dropdown_vars.items():
@@ -1156,6 +1634,7 @@ def open_encoder_config(enc_idx):
                 encoder_assignments[enc_idx][atype] = turn_key_map.get(var.get(), "none")
             else:
                 encoder_assignments[enc_idx][atype] = click_key_map.get(var.get(), "none")
+                encoder_assignments[enc_idx][f"hotkey_keys_{atype}"] = hotkey_vars[atype].get()
         save_encoder_assignments()
         win.destroy()
 
@@ -1227,6 +1706,9 @@ def open_channel_config(channel_idx):
     win.geometry("320x480")
     win.resizable(False, False)
     win.grab_set()
+    win.lift()
+    win.attributes('-topmost', True)
+    win.after(150, lambda: win.attributes('-topmost', False))
     win.configure(fg_color=t["bg"])
 
     # Set numbered icon in the title bar
@@ -1383,6 +1865,9 @@ def open_new_profile_dialog():
     win.geometry("270x155")
     win.resizable(False, False)
     win.grab_set()
+    win.lift()
+    win.attributes('-topmost', True)
+    win.after(150, lambda: win.attributes('-topmost', False))
     win.configure(fg_color=t["bg"])
 
     customtkinter.CTkLabel(
@@ -1421,7 +1906,26 @@ def open_new_profile_dialog():
 
 # --- STARTUP ---
 APP_REG_NAME = "KNOBApp"
-APP_PATH = f'"{sys.executable}" "{os.path.abspath(__file__)}" --minimized'
+if getattr(sys, 'frozen', False):
+    APP_PATH = f'"{sys.executable}" --minimized'
+else:
+    APP_PATH = f'"{sys.executable}" "{os.path.abspath(__file__)}" --minimized'
+
+def _refresh_startup_path():
+    """Si el autostart estaba activado, actualiza el path al ejecutable actual."""
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Run",
+                             0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+        try:
+            winreg.QueryValueEx(key, APP_REG_NAME)
+            winreg.SetValueEx(key, APP_REG_NAME, 0, winreg.REG_SZ, APP_PATH)
+        except FileNotFoundError:
+            pass
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+_refresh_startup_path()
 
 def is_startup_enabled():
     try:
@@ -1643,6 +2147,7 @@ def apply_theme(name):
     lbl_status_knob.configure(
         text_color="#00C853" if conectado else t["text_dim"]
     )
+    lbl_audio_device.configure(text_color=t["text_dim"])
 
     # Profile widgets
     _profile_menu_widget.configure(
@@ -1673,6 +2178,12 @@ def apply_theme(name):
             checkmark_color=t["text"]
         )
 
+    # Version label / update button
+    if btn_version.cget("text") == APP_VERSION:
+        btn_version.configure(text_color=t["text_dim"], fg_color=t["bg_mid"])
+    else:
+        btn_version.configure(fg_color=t["accent"], text_color=t["text"])
+
     # Swatch selected state
     for n, btn in swatch_buttons.items():
         if n == name:
@@ -1688,9 +2199,17 @@ def apply_theme(name):
 root.protocol("WM_DELETE_WINDOW", on_close)
 apply_theme(current_theme)
 
+# Cargar dispositivos de salida de audio
+threading.Thread(target=_load_output_devices, daemon=True).start()
+
 poll_vu()
 
 if "--minimized" in sys.argv and PYSTRAY_AVAILABLE:
     root.after(300, hide_to_tray)
+
+threading.Thread(target=_check_for_update, daemon=True).start()
+
+# Reintenta cargar íconos reales 10s después del arranque (apps pueden no estar corriendo aún)
+root.after(10000, _retry_letter_icons)
 
 root.mainloop()

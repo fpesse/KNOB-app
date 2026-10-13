@@ -12,7 +12,7 @@ UninstallDisplayIcon={app}\KNOB.exe
 
 [Files]
 Source: "E:\KNOB\dist\KNOB.exe"; DestDir: "{app}"; Flags: ignoreversion
-; Incluye otros archivos necesarios aquí si los hay
+Source: "E:\KNOB\version.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\KNOB App"; Filename: "{app}\KNOB.exe"

@@ -5,7 +5,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.png', '.'), ('fonts', 'fonts'), ('venv/Lib/site-packages/customtkinter', 'customtkinter')],
+    datas=[('icon.png', '.'), ('fonts', 'fonts'), ('venv/Lib/site-packages/customtkinter', 'customtkinter'), ('version.txt', '.')],
     hiddenimports=['pycaw.pycaw', 'comtypes', 'comtypes.client', 'comtypes.server', 'pystray', 'PIL._tkinter_finder'],
     hookspath=[],
     hooksconfig={},

@@ -15,3 +15,9 @@ Output/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local / no versionar
+.superpowers/
+KNOB App/
+.claude/settings.local.json
+github-recovery-codes.txt
