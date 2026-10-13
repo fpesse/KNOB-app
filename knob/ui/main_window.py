@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Ventana única de KNOB: barra superior, 3 canales, 2 encoders y salida de audio."""
 from PySide6.QtCore import QPoint, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QPainter
+from PySide6.QtGui import QColor, QFontMetrics, QGuiApplication, QPainter
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMenu, QPushButton, QToolButton, QVBoxLayout
 
 from knob.core import system
@@ -15,6 +15,7 @@ from knob.ui.widgets.output_bar import OutputBar
 from knob.ui.widgets.status_pill import StatusPill
 
 WINDOW_W, WINDOW_H = 520, 620
+PROFILE_TEXT_W = 140
 
 
 class GearButton(QToolButton):
@@ -120,7 +121,10 @@ class MainWindow(QMainWindow):
         return (self.channel_cards + self.encoder_cards)[ch]
 
     def set_profiles(self, names, active: str) -> None:
-        self.profile_btn.setText(f"Perfil: {active}  ▾")
+        shown = QFontMetrics(self.profile_btn.font()).elidedText(
+            active, Qt.TextElideMode.ElideRight, PROFILE_TEXT_W)
+        self.profile_btn.setText(f"Perfil: {shown.replace('&', '&&')}  ▾")
+        self.profile_btn.setToolTip(active)
         self._profile_menu.clear()
         for name in names:
             act = self._profile_menu.addAction(("✓  " if name == active else "     ") + name.replace("&", "&&"))

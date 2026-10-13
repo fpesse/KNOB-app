@@ -21,6 +21,7 @@ class ProfileNamePanel(Panel):
         head.setFont(ui_font(14, QFont.Weight.Bold))
         lay.addWidget(head)
         self.name_edit = QLineEdit(initial)
+        self.name_edit.setMaxLength(24)
         self.name_edit.setPlaceholderText("ej. Gaming, Trabajo…")
         self.name_edit.selectAll()
         self.name_edit.returnPressed.connect(self._submit)

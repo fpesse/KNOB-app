@@ -57,6 +57,7 @@ class AudioBackend:
         self._meters = {}         # app -> [IAudioMeterInformation, ...]
         self._master_meter = None
         self._mic_meter = None
+        self._meter_ok = {}       # clave -> último intento ok (para no loguear cada refresco)
         self._wake = threading.Event()
 
     # --- caché de sesiones -------------------------------------------------
@@ -98,19 +99,25 @@ class AudioBackend:
                 pass
         self._sessions = new_vol
         self._meters = new_meter
+        self._master_meter = self._activate_meter(AudioUtilities.GetSpeakers, "master", self._master_meter)
+        self._mic_meter = self._activate_meter(AudioUtilities.GetMicrophone, "mic", self._mic_meter)
+
+    def _activate_meter(self, getter, key: str, current):
+        """Medidor del dispositivo; registra solo al pasar a fallar (o el primer fallo)."""
         try:
-            spk = AudioUtilities.GetSpeakers()
-            self._master_meter = spk.Activate(IAudioMeterInformation._iid_, CLSCTX_ALL, None
-                                              ).QueryInterface(IAudioMeterInformation)
-        except Exception:
-            pass
-        try:
-            mic = AudioUtilities.GetMicrophone()
-            if mic:
-                self._mic_meter = mic.Activate(IAudioMeterInformation._iid_, CLSCTX_ALL, None
-                                               ).QueryInterface(IAudioMeterInformation)
-        except Exception:
-            pass
+            dev = getter()
+            if not dev:
+                raise RuntimeError("sin dispositivo")
+            dev = getattr(dev, "_dev", dev)      # pycaw nuevo: AudioDevice envuelve al IMMDevice
+            meter = dev.Activate(IAudioMeterInformation._iid_, CLSCTX_ALL, None
+                                 ).QueryInterface(IAudioMeterInformation)
+            self._meter_ok[key] = True
+            return meter
+        except Exception as e:
+            if self._meter_ok.get(key, True):
+                log(f"audio: medidor {key}: {e}")
+            self._meter_ok[key] = False
+            return current
 
     def app_names(self) -> list:
         try:
@@ -140,6 +147,7 @@ class AudioBackend:
     def set_mic(self, level: float) -> None:
         mic = AudioUtilities.GetMicrophone()
         if mic:
+            mic = getattr(mic, "_dev", mic)
             interface = mic.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
             interface.QueryInterface(IAudioEndpointVolume).SetMasterVolumeLevelScalar(level, None)
 

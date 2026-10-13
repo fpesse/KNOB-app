@@ -10,7 +10,7 @@ from knob.core.audio import AudioBackend, OutputDevices, find_exe_path
 from knob.core.config import Config, ProfileError
 from knob.core.engine import Engine, linear_to_vu, next_peak
 from knob.core.log import log
-from knob.core.paths import resource_path
+from knob.core.paths import is_frozen, resource_path
 from knob.core.serial_link import SerialLink
 from knob.ui.icons import AppIcons
 from knob.ui.main_window import MainWindow
@@ -110,7 +110,8 @@ class Controller(QObject):
         self._refresh_cards()
         self._refresh_profiles()
         self.window.status.set_state("searching", STATUS_TEXT["searching"])
-        system.refresh_startup_path()
+        if is_frozen():
+            system.refresh_startup_path()
         self.audio.start()
         self.focus.start()
         self.serial.start()
@@ -245,10 +246,11 @@ class Controller(QObject):
 
     def _on_status(self, state: str, detail: str) -> None:
         if state == "busy":
-            text = f"{detail} ocupado: cerrá el Serial Monitor"
+            text = f"{detail} ocupado"
+            tip = f"Cerrá el Serial Monitor de Arduino ({detail} ocupado)"
         else:
-            text = STATUS_TEXT.get(state, state)
-        self.window.status.set_state(state, text)
+            text, tip = STATUS_TEXT.get(state, state), None
+        self.window.status.set_state(state, text, tip)
 
     def _on_port_connected(self, port: str) -> None:
         self._set_config_attr("last_port", port)

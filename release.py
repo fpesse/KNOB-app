@@ -18,8 +18,6 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # 1. Actualizar version.txt y AppVersion del instalador
 print(f"[1/4] Actualizando version.txt e instalador -> {VERSION}")
-with open(os.path.join(ROOT, "version.txt"), "w", encoding="utf-8") as f:
-    f.write(VERSION + "\n")
 iss_path = os.path.join(ROOT, "KNOB_App_Installer.iss")
 with open(iss_path, encoding="utf-8") as f:
     iss, n = re.subn(r"(?m)^AppVersion=.*$", f"AppVersion={VERSION.lstrip('v')}", f.read())
@@ -27,6 +25,8 @@ if n == 0:
     print("ERROR: no se encontro AppVersion en KNOB_App_Installer.iss"); sys.exit(1)
 with open(iss_path, "w", encoding="utf-8") as f:
     f.write(iss)
+with open(os.path.join(ROOT, "version.txt"), "w", encoding="utf-8") as f:
+    f.write(VERSION + "\n")
 
 # 2. Compilar exe
 print("[2/4] Compilando exe...")

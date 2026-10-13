@@ -17,6 +17,7 @@ class StatusPill(QWidget):
         self._font = ui_font(11)
         self._state = ""
         self._text = ""
+        self._tooltip = None
         self._phase = 0.0
         self._timer = QTimer(self)
         self._timer.setInterval(50)
@@ -26,13 +27,13 @@ class StatusPill(QWidget):
     def state(self) -> str:
         return self._state
 
-    def set_state(self, state: str, text: str) -> None:
-        if state == self._state and text == self._text:
+    def set_state(self, state: str, text: str, tooltip: str = None) -> None:
+        if state == self._state and text == self._text and tooltip == self._tooltip:
             return
-        self._state, self._text = state, text
+        self._state, self._text, self._tooltip = state, text, tooltip
         fm = QFontMetrics(self._font)
         self.setFixedSize(fm.horizontalAdvance(text) + 30, 22)
-        self.setToolTip(text)
+        self.setToolTip(tooltip or text)
         if state == "searching":
             self._timer.start()
         else:

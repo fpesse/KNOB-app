@@ -10,6 +10,7 @@ from knob.core.log import log
 VALID_THEMES = ("Nebula", "Cobalt", "Magma", "Onyx", "Toxic", "Sunset")
 DEFAULT_THEME = "Nebula"
 DEFAULT_PROFILE = "Default"
+MAX_PROFILE_NAME = 24
 _THEME_MIGRATION = {"Arctic": "Onyx", "Steel": "Onyx"}
 
 
@@ -56,9 +57,14 @@ class Config:
         profiles = d.get("profiles")
         if not isinstance(profiles, dict) or not profiles:
             d["profiles"] = {DEFAULT_PROFILE: {
-                "channel_assignments": d.get("channel_assignments", {}) or {},
+                "channel_assignments": d.get("channel_assignments") if isinstance(d.get("channel_assignments"), dict) else {},
                 "encoder_assignments": d.get("encoder_assignments", [{}, {}]),
             }}
+        for pname, prof in list(d["profiles"].items()):
+            if not isinstance(prof, dict):
+                d["profiles"][pname] = prof = {}
+            if not isinstance(prof.get("channel_assignments", {}), dict):
+                prof["channel_assignments"] = {}
         if d.get("active_profile") not in d["profiles"]:
             d["active_profile"] = next(iter(d["profiles"]))
         theme = d.get("theme", DEFAULT_THEME)
@@ -108,6 +114,8 @@ class Config:
         name = (name or "").strip()
         if not name:
             raise ProfileError("El nombre no puede estar vacío")
+        if len(name) > MAX_PROFILE_NAME:
+            raise ProfileError(f"El nombre puede tener hasta {MAX_PROFILE_NAME} caracteres")
         if name in self.data["profiles"] and name != exclude:
             raise ProfileError("Ya existe un perfil con ese nombre")
         return name

@@ -136,3 +136,22 @@ def test_nombres_no_ascii_se_guardan_como_ascii(tmp_path):
     assert c2.active_profile == "Música"
     assert "Música" in c2.profile_names()
     assert c2.exe_path("spotify") == r"C:\Música\Spotify.exe"
+
+
+def test_nombre_demasiado_largo_se_rechaza(tmp_path):
+    c = Config(str(tmp_path / "config.json"))
+    with pytest.raises(ProfileError):
+        c.create_profile("x" * 25, {}, [])
+    assert c.create_profile("x" * 24, {}, []) == "x" * 24
+
+
+def test_migrate_tolera_perfiles_y_asignaciones_no_dict(tmp_path):
+    p = tmp_path / "config.json"
+    write(p, {"profiles": {"A": "basura", "B": {"channel_assignments": [1, 2]}}, "active_profile": "A"})
+    c = Config(str(p))
+    assert c.channel_assignments() == {i: None for i in range(5)}
+    c.switch_profile("B")
+    assert c.channel_assignments() == {i: None for i in range(5)}
+    p2 = tmp_path / "plano.json"
+    write(p2, {"channel_assignments": ["x"]})
+    assert Config(str(p2)).channel_assignments()[0] is None

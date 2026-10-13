@@ -43,3 +43,56 @@ def test_instalador_falla_no_sale(ctrl, monkeypatch):
     ctrl._on_update_ready("x.exe")
     assert scheduled == []
     assert ctrl._update_state[0] == "error"
+
+
+def test_cambiar_perfil_actualiza_motor_y_boton(ctrl):
+    ctrl.config.create_profile("Juegos", {0: "Discord", 3: "master"}, [])
+    ctrl.config.switch_profile("Default")
+    ctrl._switch_profile("Juegos")
+    assert ctrl.engine.channel_assignments[0] == "Discord"
+    assert "Juegos" in ctrl.window.profile_btn.text()
+
+
+def test_crear_perfil_desde_el_panel_y_borrar(ctrl):
+    ctrl.engine.channel_assignments[1] = "Opera"
+    ctrl._open_profile_name("new")
+    panel = ctrl.window.overlay.panel()
+    panel.name_edit.setText("Trabajo")
+    panel.submitted.emit("Trabajo")
+    assert ctrl.config.active_profile == "Trabajo"
+    assert ctrl.config.channel_assignments()[1] == "Opera"
+    assert "Trabajo" in ctrl.window.profile_btn.text()
+    ctrl._delete_profile()
+    assert ctrl.config.profile_names() == ["Default"]
+    assert "Default" in ctrl.window.profile_btn.text()
+
+
+def test_assign_persiste_y_refresca_tarjeta(ctrl):
+    ctrl._assign(0, "master")
+    assert ctrl.config.channel_assignments()[0] == "master"
+    assert ctrl.window.card_for(0).name_label.toolTip() == "Volumen general"
+
+
+def test_efectos_no_lanzan_si_el_backend_falla(ctrl, monkeypatch):
+    from knob.core import system
+
+    def boom(*a):
+        raise RuntimeError("x")
+    monkeypatch.setattr(ctrl.audio, "set_volume", boom)
+    monkeypatch.setattr(system, "send_media_key", boom)
+    ctrl.set_volume("master", 0.5)
+    ctrl.media_key("play_pause")
+
+
+def test_assign_con_fallo_de_guardado_conserva_memoria(ctrl, monkeypatch):
+    def boom(self, *a):
+        raise OSError("disco lleno")
+    monkeypatch.setattr(cfg.Config, "set_channel_assignment", boom)
+    ctrl._assign(2, "mic")
+    assert ctrl.engine.channel_assignments[2] == "mic"
+
+
+def test_estado_ocupado_texto_corto_y_tooltip(ctrl):
+    ctrl._on_status("busy", "COM12")
+    assert ctrl.window.status._text == "COM12 ocupado"
+    assert "Serial Monitor de Arduino (COM12 ocupado)" in ctrl.window.status.toolTip()

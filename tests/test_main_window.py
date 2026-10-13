@@ -137,3 +137,30 @@ def test_output_bar_nombre_y_flechas(qapp):
     btns[0].click()
     btns[1].click()
     assert got == ["prev", "next"]
+
+
+def test_boton_de_perfil_elide_y_escapa(qapp):
+    from knob.ui.main_window import MainWindow
+    from knob.ui.theme import get_theme
+    w = MainWindow(get_theme("Nebula"))
+    w.set_profiles(["P"], "M" * 40)
+    assert "…" in w.profile_btn.text() or "..." in w.profile_btn.text()   # Qt 6.8 elide con tres puntos
+    assert w.profile_btn.toolTip() == "M" * 40
+    w.set_profiles(["R&B"], "R&B")
+    assert "R&&B" in w.profile_btn.text()
+
+
+def test_barra_superior_sin_solapes(qapp):
+    from knob.ui.main_window import MainWindow
+    from knob.ui.theme import build_qss, get_theme
+    t = get_theme("Nebula")
+    qapp.setStyleSheet(build_qss(t))
+    w = MainWindow(t)
+    w.set_profiles(["W" * 24], "W" * 24)
+    w.status.set_state("busy", "COM12 ocupado", "Cerrá el Serial Monitor de Arduino (COM12 ocupado)")
+    w.show()
+    qapp.processEvents()
+    assert not w.status.geometry().intersects(w.profile_btn.geometry())
+    assert not w.brand.geometry().intersects(w.status.geometry())
+    assert w.status.toolTip().startswith("Cerrá el Serial Monitor")
+    w.hide()
