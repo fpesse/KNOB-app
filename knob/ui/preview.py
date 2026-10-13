@@ -11,7 +11,27 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from knob.ui.main_window import MainWindow
+from knob.ui.overlays.assign_channel import AssignChannelPanel
+from knob.ui.overlays.encoder_config import EncoderConfigPanel
+from knob.ui.overlays.settings_panel import SettingsPanel
 from knob.ui.theme import build_qss, get_theme, ui_font
+
+
+def open_demo_overlay(w, theme, which):
+    if which == "assign":
+        w.overlay.open_centered(AssignChannelPanel(
+            "Canal 1", "Opera", ["Opera", "Discord", "Spotify", "Chrome"], lambda n: None, theme), 340)
+    elif which == "encoder":
+        w.overlay.open_centered(EncoderConfigPanel(0, "Volumen general", {
+            "click": "play_pause", "dblclick": "hotkey", "click_turn": "output_device",
+            "hotkey_keys_dblclick": "ctrl+shift+m"}, theme), 360)
+    elif which == "settings":
+        p = SettingsPanel(theme)
+        p.set_profiles(["Default", "Gaming", "Trabajo"], "Gaming")
+        p.set_startup(True)
+        p.set_version("v4.0.0")
+        p.set_update_state("available", "↑ v4.0.1 disponible")
+        w.overlay.open_side(p)
 
 
 def build_demo_window(theme):
@@ -38,6 +58,9 @@ def main(argv):
     shot = argv[argv.index("--screenshot") + 1] if "--screenshot" in argv else None
     if shot in args:
         args.remove(shot)
+    overlay = argv[argv.index("--overlay") + 1] if "--overlay" in argv else None
+    if overlay in args:
+        args.remove(overlay)
     app = QApplication(argv)
     app.setStyle("Fusion")
     app.setFont(ui_font(13))
@@ -46,6 +69,8 @@ def main(argv):
     w = build_demo_window(theme)
     w.close_requested.connect(app.quit)
     w.show()
+    if overlay:
+        QTimer.singleShot(50, lambda: open_demo_overlay(w, theme, overlay))
 
     t = {"v": 0.0}
 
@@ -63,7 +88,7 @@ def main(argv):
             w.grab().save(shot)
             print(f"Captura guardada en {shot}")
             app.quit()
-        QTimer.singleShot(600, capture)
+        QTimer.singleShot(900 if overlay else 600, capture)
     else:
         timer = QTimer(w)
         timer.timeout.connect(animate)

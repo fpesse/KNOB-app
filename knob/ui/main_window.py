@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMenu, QPushButton, QToolButton, QVBoxLayout
 
 from knob.core import system
+from knob.ui.overlays.base import OverlayHost
 from knob.ui.theme import GLYPH_SETTINGS, icon_font
 from knob.ui.widgets.brand import BrandLabel
 from knob.ui.widgets.channel_card import ChannelCard
@@ -112,6 +113,7 @@ class MainWindow(QMainWindow):
         self.output_bar.prev_clicked.connect(self.output_prev)
         self.output_bar.next_clicked.connect(self.output_next)
         root.addWidget(self.output_bar)
+        self.overlay = OverlayHost(self.backdrop)
 
     # --- API para el controlador ---------------------------------------
     def card_for(self, ch: int):
