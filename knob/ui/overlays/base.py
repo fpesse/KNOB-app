@@ -59,10 +59,12 @@ class OptionRow(QWidget):
             b.set_content(*badge)
             lay.addWidget(b)
         label = QLabel(text)
+        label.setTextFormat(Qt.TextFormat.PlainText)
         label.setFont(ui_font(12, QFont.Weight.DemiBold if selected else QFont.Weight.Normal))
         lay.addWidget(label, 1)
         if hint:
             h = QLabel(hint)
+            h.setTextFormat(Qt.TextFormat.PlainText)
             h.setObjectName("dim")
             h.setFont(ui_font(10))
             lay.addWidget(h)
@@ -158,14 +160,14 @@ class OverlayHost(QWidget):
         self.setFocus()
 
         group = QParallelAnimationGroup(self)
-        slide = QPropertyAnimation(panel, b"pos", self)
+        slide = QPropertyAnimation(panel, b"pos", group)
         slide.setDuration(ANIM_MS)
         slide.setStartValue(start)
         slide.setEndValue(end)
         slide.setEasingCurve(QEasingCurve.Type.OutCubic)
         group.addAnimation(slide)
         if not was_visible:
-            fade = QPropertyAnimation(self._effect, b"opacity", self)
+            fade = QPropertyAnimation(self._effect, b"opacity", group)
             fade.setDuration(ANIM_MS)
             fade.setStartValue(0.0)
             fade.setEndValue(1.0)
@@ -203,6 +205,7 @@ class OverlayHost(QWidget):
             if self._closing:                 # solo la animación de cierre tiene 'finished' conectado
                 self._anim.finished.disconnect()
             self._anim.stop()
+            self._anim.deleteLater()
             self._anim = None
 
     def _dispose_panel(self) -> None:

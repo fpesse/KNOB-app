@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Panel 'Canal N · ¿Qué controla?': destinos de sistema + apps con audio."""
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
@@ -21,6 +21,7 @@ class AssignChannelPanel(Panel):
         lay.setContentsMargins(14, 14, 14, 12)
         lay.setSpacing(2)
         head = QLabel(f"{title} · ¿Qué controla?")
+        head.setTextFormat(Qt.TextFormat.PlainText)
         head.setFont(ui_font(14, QFont.Weight.Bold))
         lay.addWidget(head)
 

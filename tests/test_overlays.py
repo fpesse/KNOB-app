@@ -112,3 +112,67 @@ def test_ajustes(qapp):
     p.set_profiles(["Default"], "Default")
     assert not p.btn_delete.isEnabled()
     assert not p.grab().isNull()
+
+
+def test_borrar_usa_un_solo_timer(qapp):
+    from knob.ui.overlays.settings_panel import SettingsPanel
+    p = SettingsPanel(theme())
+    p.set_profiles(["Default", "Gaming"], "Gaming")
+    p.btn_delete.click()
+    assert p._confirm_timer.isActive()
+    p.set_profiles(["Default", "Gaming"], "Gaming")       # reinicia
+    assert not p._confirm_timer.isActive()
+    p.btn_delete.click()
+    assert p._confirm_timer.isActive()
+    assert p.btn_delete.text() != "Borrar"
+    p._reset_delete()
+    assert not p._confirm_timer.isActive()
+
+
+def test_animaciones_no_se_acumulan(qapp):
+    from PySide6.QtCore import QAbstractAnimation
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtTest import QTest
+    from knob.ui.main_window import MainWindow
+    from knob.ui.overlays.base import Panel
+    w = MainWindow(theme())
+    w.show()
+    for _ in range(5):
+        w.overlay.open_centered(Panel(), 300)
+        w.overlay.close_overlay()
+        w.overlay._finish_close()
+        QApplication.sendPostedEvents(None, 0)
+        qapp.processEvents()
+    QTest.qWait(50)
+    assert len(w.overlay.findChildren(QAbstractAnimation)) <= 2
+
+
+def test_textos_de_usuario_son_texto_plano(qapp):
+    from PySide6.QtWidgets import QLabel
+    from knob.ui.overlays.base import OptionRow
+    from knob.ui.overlays.settings_panel import SettingsPanel
+    r = OptionRow("<b>x</b>", theme(), hint="<i>y</i>")
+    labels = r.findChildren(QLabel)
+    assert all(l.textFormat() == Qt.TextFormat.PlainText for l in labels)
+    assert labels[0].text() == "<b>x</b>"
+    p = SettingsPanel(theme())
+    p.set_profiles(["Default", "R&B"], "R&B")
+    p.btn_delete.click()
+    assert "R&&B" in p.btn_delete.text()
+
+
+def test_hotkey_esc_cancela_y_combo_graba(qapp):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+    from knob.ui.overlays.encoder_config import HotkeyButton
+    b = HotkeyButton("ctrl+k")
+    got = []
+    b.changed.connect(got.append)
+    K, M = Qt.Key, Qt.KeyboardModifier
+    b._start()
+    QApplication.sendEvent(b, QKeyEvent(QEvent.Type.KeyPress, K.Key_Escape.value, M.NoModifier))
+    assert got == [] and b.combo() == "ctrl+k" and b.text() == "Ctrl + K"
+    b._start()
+    QApplication.sendEvent(b, QKeyEvent(QEvent.Type.KeyPress, K.Key_M.value, M.ControlModifier, "m"))
+    assert got == ["ctrl+m"] and b.combo() == "ctrl+m"

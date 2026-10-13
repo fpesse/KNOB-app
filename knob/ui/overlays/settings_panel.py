@@ -60,6 +60,10 @@ class SettingsPanel(Panel):
         self._t = theme
         self._active = ""
         self._confirm_delete = False
+        self._confirm_timer = QTimer(self)
+        self._confirm_timer.setSingleShot(True)
+        self._confirm_timer.setInterval(DELETE_CONFIRM_MS)
+        self._confirm_timer.timeout.connect(self._reset_delete)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(18, 16, 18, 16)
         lay.setSpacing(4)
@@ -197,12 +201,13 @@ class SettingsPanel(Panel):
     def _on_delete(self) -> None:
         if not self._confirm_delete:
             self._confirm_delete = True
-            self.btn_delete.setText(f"¿Borrar «{self._active}»?")
-            QTimer.singleShot(DELETE_CONFIRM_MS, self._reset_delete)
+            self.btn_delete.setText(f"¿Borrar «{self._active.replace('&', '&&')}»?")
+            self._confirm_timer.start()
             return
         self._reset_delete()
         self.profile_delete.emit()
 
     def _reset_delete(self) -> None:
+        self._confirm_timer.stop()
         self._confirm_delete = False
         self.btn_delete.setText("Borrar")

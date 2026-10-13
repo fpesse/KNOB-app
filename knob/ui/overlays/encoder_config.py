@@ -102,6 +102,11 @@ class HotkeyButton(QPushButton):
             super().keyPressEvent(e)
             return
         mods = e.modifiers()
+        if _int(e.key()) == _K.Key_Escape.value and not (
+                mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+                        | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)):
+            self._stop()                      # Esc solo: cancela la grabación
+            return
         combo = build_combo(bool(mods & Qt.KeyboardModifier.ControlModifier),
                             bool(mods & Qt.KeyboardModifier.ShiftModifier),
                             bool(mods & Qt.KeyboardModifier.AltModifier),
