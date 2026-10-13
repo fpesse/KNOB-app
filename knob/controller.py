@@ -52,6 +52,7 @@ class Controller(QObject):
         self._update = None
         self._update_state = ("none", "")
         self._settings = None
+        self._quitting = False
         self._vu_peak = [0.0, 0.0, 0.0]
         self._connect_signals()
         self._timers = []
@@ -113,7 +114,7 @@ class Controller(QObject):
         self.audio.start()
         self.focus.start()
         self.serial.start()
-        threading.Thread(target=lambda: self._output_loaded.emit(self.outputs.load() or ""), daemon=True).start()
+        threading.Thread(target=self._load_outputs, daemon=True).start()
         threading.Thread(target=self._check_update, daemon=True).start()
         for timer in self._timers:
             timer.start()
@@ -122,7 +123,17 @@ class Controller(QObject):
         else:
             self.window.show()
 
+    def _load_outputs(self) -> None:
+        name = ""
+        try:
+            name = self.outputs.load() or ""
+        except Exception as e:
+            log(f"outputs.load: {e}")
+        self._output_loaded.emit(name)
+
     def _on_close_requested(self) -> None:
+        if self._quitting:
+            return
         if self.config.minimize_to_tray and Tray.available():
             self.hide_to_tray()
         else:
@@ -140,10 +151,15 @@ class Controller(QObject):
         self.window.activateWindow()
 
     def quit(self) -> None:
+        if self._quitting:
+            return
+        self._quitting = True
         for timer in self._timers:
             timer.stop()
         self.serial.stop()
         self.tray.hide()
+        self.window.overlay.close_overlay()
+        self.window.hide()
         self.app.quit()
 
     # --- Effects (los llama el motor; nunca deben lanzar) ---------------------------
@@ -160,7 +176,13 @@ class Controller(QObject):
             log(f"media_key: {e}")
 
     def send_hotkey(self, combo: str) -> None:
-        threading.Thread(target=system.send_hotkey, args=(combo,), daemon=True).start()
+        def run():
+            try:
+                system.send_hotkey(combo)
+            except Exception as e:
+                log(f"send_hotkey: {e}")
+
+        threading.Thread(target=run, daemon=True).start()
 
     def step_master(self, delta: float) -> None:
         try:
@@ -384,5 +406,10 @@ class Controller(QObject):
         threading.Thread(target=run, daemon=True).start()
 
     def _on_update_ready(self, path: str) -> None:
-        updater.launch_installer(path)
+        try:
+            updater.launch_installer(path)
+        except Exception as e:
+            log(f"lanzar instalador: {e}")
+            self._set_update_state("error", "No se pudo abrir el instalador")
+            return
         QTimer.singleShot(500, self.quit)     # salir de verdad para que el instalador pueda reemplazar archivos
