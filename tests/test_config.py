@@ -123,3 +123,16 @@ def test_preferencias_y_exe_paths(tmp_path):
     assert c2.exe_path("discord") == r"C:\Discord\Discord.exe"
     with pytest.raises(ValueError):
         c2.theme = "Arctic"
+
+
+def test_nombres_no_ascii_se_guardan_como_ascii(tmp_path):
+    p = tmp_path / "config.json"
+    c = Config(str(p))
+    c.create_profile("Música", {}, [])
+    c.remember_exe_path("Spotify", r"C:\Música\Spotify.exe")
+    raw = p.read_bytes()
+    raw.decode("ascii")   # v3.3 lee sin encoding: el archivo debe ser ASCII puro
+    c2 = Config(str(p))
+    assert c2.active_profile == "Música"
+    assert "Música" in c2.profile_names()
+    assert c2.exe_path("spotify") == r"C:\Música\Spotify.exe"

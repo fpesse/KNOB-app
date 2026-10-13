@@ -70,7 +70,7 @@ class Config:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=2, ensure_ascii=False)
+                json.dump(self.data, f, indent=2, ensure_ascii=True)
             os.replace(tmp, self.path)
 
     # --- perfil activo ----------------------------------------------------
