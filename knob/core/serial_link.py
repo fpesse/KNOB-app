@@ -106,6 +106,8 @@ class SerialLink(QObject):
                     except Exception:
                         pass
                     self._ser = None
+                    with self._latest_lock:
+                        self._latest = None
                     if self._running:
                         log("Conexión perdida, reiniciando búsqueda...")
                         self.status_changed.emit("searching", "")
@@ -134,7 +136,12 @@ class SerialLink(QObject):
                     any_busy = True
                     self.status_changed.emit("busy", dev)
                 continue
-            if handshake(ser):
+            try:
+                ok = handshake(ser)
+            except Exception as e:
+                log(f"{dev}: error en handshake: {e}")
+                ok = False
+            if ok:
                 log(f"Conectado en {dev}")
                 self.status_changed.emit("connected", dev)
                 self.port_connected.emit(dev)
