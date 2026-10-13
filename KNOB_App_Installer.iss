@@ -1,7 +1,7 @@
 ; Script de Inno Setup para KNOB App
 [Setup]
 AppName=KNOB App
-AppVersion=3.0.0
+AppVersion=4.0.0
 DefaultDirName={pf}\KNOB App
 DefaultGroupName=KNOB App
 OutputBaseFilename=KNOB_App_Installer
@@ -9,9 +9,10 @@ Compression=lzma
 SolidCompression=yes
 SetupIconFile=E:\KNOB\icon.ico
 UninstallDisplayIcon={app}\KNOB.exe
+CloseApplications=force
 
 [Files]
-Source: "E:\KNOB\dist\KNOB.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "E:\KNOB\dist\KNOB\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "E:\KNOB\version.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

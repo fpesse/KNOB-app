@@ -2,7 +2,7 @@
 Uso: python release.py v3.2.0 ghp_TOKEN
 Hace todo: actualiza version.txt, compila, crea release en GitHub y sube el instalador.
 """
-import sys, os, subprocess, json, urllib.request
+import sys, os, re, subprocess, json, urllib.request
 
 if len(sys.argv) < 3:
     print("Uso: python release.py v3.2.0 ghp_TOKEN")
@@ -16,10 +16,15 @@ if not VERSION.startswith("v"):
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# 1. Actualizar version.txt
-print(f"[1/4] Actualizando version.txt -> {VERSION}")
+# 1. Actualizar version.txt y AppVersion del instalador
+print(f"[1/4] Actualizando version.txt e instalador -> {VERSION}")
 with open(os.path.join(ROOT, "version.txt"), "w", encoding="utf-8") as f:
     f.write(VERSION + "\n")
+iss_path = os.path.join(ROOT, "KNOB_App_Installer.iss")
+with open(iss_path, encoding="utf-8") as f:
+    iss = re.sub(r"(?m)^AppVersion=.*$", f"AppVersion={VERSION.lstrip('v')}", f.read())
+with open(iss_path, "w", encoding="utf-8") as f:
+    f.write(iss)
 
 # 2. Compilar exe
 print("[2/4] Compilando exe...")
