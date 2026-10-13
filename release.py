@@ -22,14 +22,16 @@ with open(os.path.join(ROOT, "version.txt"), "w", encoding="utf-8") as f:
     f.write(VERSION + "\n")
 iss_path = os.path.join(ROOT, "KNOB_App_Installer.iss")
 with open(iss_path, encoding="utf-8") as f:
-    iss = re.sub(r"(?m)^AppVersion=.*$", f"AppVersion={VERSION.lstrip('v')}", f.read())
+    iss, n = re.subn(r"(?m)^AppVersion=.*$", f"AppVersion={VERSION.lstrip('v')}", f.read())
+if n == 0:
+    print("ERROR: no se encontro AppVersion en KNOB_App_Installer.iss"); sys.exit(1)
 with open(iss_path, "w", encoding="utf-8") as f:
     f.write(iss)
 
 # 2. Compilar exe
 print("[2/4] Compilando exe...")
 r = subprocess.run(
-    [os.path.join(ROOT, "venv/Scripts/pyinstaller.exe"), "--clean", "KNOB.spec"],
+    [os.path.join(ROOT, "venv/Scripts/pyinstaller.exe"), "--clean", "-y", "KNOB.spec"],
     cwd=ROOT
 )
 if r.returncode != 0:
